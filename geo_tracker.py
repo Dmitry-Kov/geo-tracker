@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GEO-трекер Optimize.uz — мониторинг цитируемости доменов в ответах ИИ.
+GEO tracker — monitors how often domains are cited in AI answers.
 
-Архитектура: только официальные API, никакой браузерной автоматизации.
-Движки включаются автоматически по наличию ключей в .env / переменных окружения:
+Architecture: official APIs only, no browser automation.
+Engines enable themselves based on keys in .env / environment variables:
 
-  GEMINI_API_KEY      — Gemini + Google Search grounding (бесплатный тир, aistudio.google.com)
-  PERPLEXITY_API_KEY  — Perplexity Sonar (кредиты Pro-подписки или pay-as-you-go)
-  OPENAI_API_KEY      — OpenAI Responses API + web_search (платно, копейки на mini-модели)
+  GEMINI_API_KEY      — Gemini + Google Search grounding (free tier, aistudio.google.com)
+  PERPLEXITY_API_KEY  — Perplexity Sonar (Pro subscription credits or pay-as-you-go)
+  OPENAI_API_KEY      — OpenAI Responses API + web_search (paid, cents on mini models)
 
-Команды:
-  run            — прогнать матрицу запросов, дописать результаты в results.csv
-  report         — консольная сводка + HTML-дашборд (dashboard.html)
-  manual-export  — выгрузить чеклист CSV для ручного прогона (ChatGPT, Яндекс Нейро)
-  manual-import  — влить заполненный чеклист в общую историю
+Commands:
+  run            — run the query matrix, append results to results.csv
+  report         — console summary + HTML dashboard (dashboard.html)
+  manual-export  — export a CSV checklist for manual runs (ChatGPT, Yandex Neuro)
+  manual-import  — merge a filled checklist into the shared history
 
-Примеры:
+Examples:
   python geo_tracker.py run
   python geo_tracker.py run --engines gemini --niches tech,medical --limit 3
   python geo_tracker.py report
@@ -46,15 +46,15 @@ DASHBOARD_HTML = BASE_DIR / "dashboard.html"
 
 TIMEOUT = 90
 RETRIES = 4
-BACKOFF = (3, 8, 20)  # секунды между попытками при сетевых/прочих ошибках
-THROTTLE_BACKOFF = (10, 30, 60)  # паузы при 429 (rate limit) и 503 (high demand)
+BACKOFF = (3, 8, 20)  # seconds between attempts on network/other errors
+THROTTLE_BACKOFF = (10, 30, 60)  # waits on 429 (rate limit) and 503 (high demand)
 
 # ---------------------------------------------------------------------------
-# Окружение
+# Environment
 # ---------------------------------------------------------------------------
 
 def load_env() -> None:
-    """Подхватываем .env рядом со скриптом, не перетирая уже заданные переменные."""
+    """Load .env next to the script without overriding already-set variables."""
     env_path = BASE_DIR / ".env"
     if not env_path.exists():
         return
@@ -68,11 +68,11 @@ def load_env() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Матчинг доменов
+# Domain matching
 # ---------------------------------------------------------------------------
 
 def domain_in_url(domain: str, url: str) -> bool:
-    """Точное совпадение хоста: pc.uz матчит pc.uz и www.pc.uz, но не 1pc.uz."""
+    """Exact host match: pc.uz matches pc.uz and www.pc.uz, but not 1pc.uz."""
     try:
         netloc = urlparse(url if "://" in url else "https://" + url).netloc.lower()
     except ValueError:
@@ -82,13 +82,13 @@ def domain_in_url(domain: str, url: str) -> bool:
 
 
 def domain_in_text(domain: str, text: str) -> bool:
-    """Упоминание домена в тексте с границами, чтобы pc.uz не ловил 1pc.uz."""
+    """Domain mention in text with word boundaries so pc.uz won't catch 1pc.uz."""
     pattern = r"(?<![\w.-])" + re.escape(domain) + r"(?![\w-])"
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
 def match_domains(answer_text: str, source_urls: list, source_titles: list) -> dict:
-    """Для каждого домена: src (в источниках) и txt (в тексте ответа)."""
+    """For each domain: src (among sources) and txt (in the answer text)."""
     hits = {}
     titles_blob = " ".join(source_titles)
     for d in DOMAINS:
@@ -99,15 +99,15 @@ def match_domains(answer_text: str, source_urls: list, source_titles: list) -> d
 
 
 # ---------------------------------------------------------------------------
-# Движки
+# Engines
 # ---------------------------------------------------------------------------
 
 class QuotaExhausted(RuntimeError):
-    """Суточная квота движка исчерпана — ретраить бессмысленно."""
+    """The engine's daily quota is exhausted — retrying is pointless."""
 
 
 def _parse_429(body: str) -> tuple:
-    """Из тела 429 Google: (имена квот из QuotaFailure, retryDelay из RetryInfo в сек)."""
+    """From a Google 429 body: (quota names from QuotaFailure, RetryInfo delay in sec)."""
     quotas, delay = [], None
     try:
         details = json.loads(body).get("error", {}).get("details", [])
@@ -138,8 +138,8 @@ def _post_with_retries(url: str, *, headers: dict, payload: dict) -> dict:
                 qname = "; ".join(quotas) or "квота не указана в details"
                 daily = (any("PerDay" in q for q in quotas)
                          or ("RESOURCE_EXHAUSTED" in body and not quotas and delay is None))
-                # Суточной квоте даём один шанс пересидеть короткий RetryInfo
-                # (окно иногда скользящее), повторный 429 — стоп без ретраев.
+                # Give a daily quota one chance to sit out a short RetryInfo
+                # (the window is sometimes sliding); a repeat 429 stops retries.
                 if daily and (attempt >= 1 or delay is None or delay > 120):
                     raise QuotaExhausted(f"суточная квота: {qname}")
                 wait = (int(delay) + 2 if delay and delay <= 120
@@ -164,10 +164,11 @@ def _post_with_retries(url: str, *, headers: dict, payload: dict) -> dict:
 
 
 def ask_gemini(query: str) -> dict:
-    """Gemini + Google Search grounding. Источники берём из groundingChunks.
+    """Gemini + Google Search grounding. Sources come from groundingChunks.
 
-    Важно: uri в groundingChunks — это redirect-ссылки Google, домен в них не виден.
-    Поэтому домен ищем в web.title (там обычно хост источника) и в тексте ответа.
+    Note: groundingChunks uris are Google redirect links that hide the real
+    host, so domains are matched against web.title (usually the source host)
+    and the answer text.
     """
     model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -197,7 +198,7 @@ def ask_gemini(query: str) -> dict:
 
 
 def ask_perplexity(query: str) -> dict:
-    """Perplexity Sonar. Источники: citations + search_results."""
+    """Perplexity Sonar. Sources: citations + search_results."""
     model = os.environ.get("PERPLEXITY_MODEL", "sonar")
     payload = {
         "model": model,
@@ -221,7 +222,7 @@ def ask_perplexity(query: str) -> dict:
 
 
 def ask_openai(query: str) -> dict:
-    """OpenAI Responses API + web_search. Источники: url_citation-аннотации."""
+    """OpenAI Responses API + web_search. Sources: url_citation annotations."""
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
     payload = {
         "model": model,
@@ -262,7 +263,7 @@ def available_engines() -> list:
 
 
 # ---------------------------------------------------------------------------
-# CSV: история результатов
+# CSV: results history
 # ---------------------------------------------------------------------------
 
 def csv_fieldnames() -> list:
@@ -275,7 +276,7 @@ def csv_fieldnames() -> list:
 
 
 def append_row(row: dict) -> None:
-    """Дописываем построчно — при падении посреди прогона данные не теряются."""
+    """Append rows one by one — a crash mid-run loses nothing."""
     fields = csv_fieldnames()
     is_new = not RESULTS_CSV.exists()
     with RESULTS_CSV.open("a", newline="", encoding="utf-8-sig") as f:
@@ -319,7 +320,7 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
 
 
 # ---------------------------------------------------------------------------
-# Команда run
+# run command
 # ---------------------------------------------------------------------------
 
 def cmd_run(args) -> None:
@@ -361,7 +362,7 @@ def cmd_run(args) -> None:
     print(f"Движки: {', '.join(engines)} | Ниши: {', '.join(niches)} | Запросов к API: {total}\n")
 
     done, hits_total = 0, 0
-    dead = set()  # движки, снятые с прогона из-за исчерпанной квоты
+    dead = set()  # engines dropped from the run due to exhausted quota
     for niche in niches:
         queries = NICHES[niche]["queries"]
         if args.limit:
@@ -388,7 +389,7 @@ def cmd_run(args) -> None:
                           f"Дожать после сброса квоты: python geo_tracker.py run --resume")
                     append_row(row)
                     continue
-                except Exception as e:  # noqa: BLE001 — пишем ошибку в историю и едем дальше
+                except Exception as e:  # noqa: BLE001 — record the error and move on
                     row = make_row(engine, niche, query, status=f"error: {e}")
                     print(f"{label} ✗ {e}")
                 append_row(row)
@@ -405,11 +406,11 @@ def cmd_run(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Команда report
+# report command
 # ---------------------------------------------------------------------------
 
 def share_of_voice(rows: list, *, run_date: str = None, engine: str = None) -> dict:
-    """{niche: {domain: процент запросов с попаданием (src или txt)}}"""
+    """{niche: {domain: % of the niche's queries with a hit (src or txt)}}"""
     sov = {}
     for niche in NICHES:
         subset = [r for r in rows
@@ -470,7 +471,7 @@ def cmd_report(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ручной режим: чеклист для ChatGPT / Яндекс Нейро
+# Manual mode: checklist for ChatGPT / Yandex Neuro
 # ---------------------------------------------------------------------------
 
 MANUAL_FIELDS = ["engine", "niche", "query", "domains_in_sources", "domains_in_text"]

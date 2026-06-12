@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Экспорт отчёта GEO-трекера в брендированный DOCX Optimize.uz.
+GEO tracker report export to a branded Optimize.uz DOCX.
 
-Использование:
-  python report_docx.py            → geo_report_ДАТА.docx
-  python report_docx.py --out путь
+Usage:
+  python report_docx.py            → geo_report_DATE.docx
+  python report_docx.py --out path
 
-Стиль повторяет dashboard.html: ink #16181D, акцент #FF5C1F,
-заголовки Space Grotesk, текст Inter, цифры JetBrains Mono.
+The style mirrors dashboard.html: ink #16181D, accent #FF5C1F,
+Space Grotesk headings, Inter body text, JetBrains Mono figures.
 """
 
 import argparse
@@ -31,7 +31,7 @@ INK = RGBColor(0x16, 0x18, 0x1D)
 ACCENT = RGBColor(0xFF, 0x5C, 0x1F)
 MUTED = RGBColor(0x6B, 0x71, 0x80)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-ACCENT_SOFT = "FFF0E9"   # заливки в w:shd задаются hex-строкой
+ACCENT_SOFT = "FFF0E9"   # w:shd fills take a plain hex string
 LINE = "E4E6E0"
 
 F_HEAD = "Space Grotesk"
@@ -40,7 +40,7 @@ F_MONO = "JetBrains Mono"
 
 
 # ---------------------------------------------------------------------------
-# Данные (та же логика, что в report_html)
+# Data (same logic as report_html)
 # ---------------------------------------------------------------------------
 
 def _hit(row, domain):
@@ -64,7 +64,7 @@ def sov(rows, *, niche=None, engine=None):
 
 
 # ---------------------------------------------------------------------------
-# Низкоуровневые помощники оформления
+# Low-level formatting helpers
 # ---------------------------------------------------------------------------
 
 def shade(cell, hex_color):
@@ -111,7 +111,7 @@ def make_table(doc, n_rows, n_cols):
     table = doc.add_table(rows=n_rows, cols=n_cols)
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    # перекрашиваем сетку Table Grid в фирменную линию
+    # repaint the Table Grid borders in the brand hairline color
     tbl_pr = table._tbl.tblPr
     borders = OxmlElement("w:tblBorders")
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
@@ -142,7 +142,7 @@ def header_row(table, labels):
 
 
 def pct_cell(cell, value, *, primary=False):
-    """Ячейка с процентом: заливка по уровню видимости, рамка-маркер у целевого."""
+    """Percentage cell: fill intensity by visibility level, marker on the primary."""
     if value >= 50:
         fill, color, bold = "FF5C1F", WHITE, True
     elif value >= 20:
@@ -156,7 +156,7 @@ def pct_cell(cell, value, *, primary=False):
 
 
 # ---------------------------------------------------------------------------
-# Сборка документа
+# Document assembly
 # ---------------------------------------------------------------------------
 
 def build_docx(out_path: Path) -> Path:
@@ -172,7 +172,7 @@ def build_docx(out_path: Path) -> Path:
         section.left_margin = section.right_margin = Cm(2)
         section.top_margin, section.bottom_margin = Cm(1.8), Cm(1.8)
 
-    # Шапка: Optimize<.>uz GEO-монитор, как в дашборде
+    # Header: Optimize<.>uz GEO monitor, same as the dashboard
     p = doc.add_paragraph()
     style_run(p.add_run("Optimize"), font=F_HEAD, size=22, bold=True)
     style_run(p.add_run("."), font=F_HEAD, size=22, bold=True, color=ACCENT)
@@ -184,7 +184,7 @@ def build_docx(out_path: Path) -> Path:
          f"сформирован {datetime.now().strftime('%d.%m.%Y %H:%M')}",
          font=F_MONO, size=8.5, color=MUTED, space_after=12)
 
-    # KPI-строка
+    # KPI row
     kpi = make_table(doc, 2, 4)
     for i, (val, label) in enumerate([
             (str(len(latest_ok)), f"ответов в прогоне {latest}"),
@@ -196,7 +196,7 @@ def build_docx(out_path: Path) -> Path:
                   color=ACCENT if i == 2 else INK)
         fill_cell(kpi.rows[1].cells[i], label, size=8, color=MUTED)
 
-    # Матрица видимости по нишам
+    # Visibility matrix by niche
     heading(doc, "Видимость по нишам")
     para(doc, "Доля запросов ниши, где домен попал в источники (src) или текст "
               "ответа (txt). ★ — целевой домен ниши.",
@@ -216,7 +216,7 @@ def build_docx(out_path: Path) -> Path:
                      primary=d == cfg["primary_domain"])
         r_i += 1
 
-    # Общий зачёт
+    # Overall leaderboard
     heading(doc, "Общий зачёт по доменам")
     total = sov(latest_ok) or {}
     lb = sorted(total.items(), key=lambda x: -x[1])
@@ -231,7 +231,7 @@ def build_docx(out_path: Path) -> Path:
         fill_cell(t.rows[i].cells[2], note, size=8.5,
                   color=INK if niches_hit else MUTED, center=False)
 
-    # Разбивка по движкам
+    # Per-engine breakdown
     heading(doc, "Сравнение движков")
     e_rows = [e for e in engines if sov(latest_ok, engine=e)]
     et = make_table(doc, len(e_rows) + 1, len(DOMAINS) + 2)
@@ -244,7 +244,7 @@ def build_docx(out_path: Path) -> Path:
         for c_i, d in enumerate(DOMAINS, start=2):
             pct_cell(et.rows[i].cells[c_i], by_dom[d])
 
-    # Автовыводы по данным
+    # Auto-derived findings from the data
     heading(doc, "Ключевые наблюдения")
     consensus = []
     single = []
@@ -267,7 +267,7 @@ def build_docx(out_path: Path) -> Path:
         para(doc, "✗ Не цитируются ни одним движком: " + ", ".join(zeros),
              size=9.5, bold=True, color=ACCENT, space_after=3)
 
-    # Попадания последнего прогона
+    # Hits from the latest run
     heading(doc, "Запросы с попаданиями (последний прогон)")
     hits = [(r, [d for d in DOMAINS if _hit(r, d)])
             for r in latest_ok if any(_hit(r, d) for d in DOMAINS)]
@@ -284,7 +284,7 @@ def build_docx(out_path: Path) -> Path:
     else:
         para(doc, "Попаданий нет.", size=9.5, color=MUTED)
 
-    # Подвал
+    # Footer
     p = para(doc, "", space_before=16)
     hairline(p)
     para(doc, "Optimize.uz · GEO-трекер · только официальные API (Gemini, "

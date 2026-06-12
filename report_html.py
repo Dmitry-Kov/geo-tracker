@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Генератор HTML-дашборда GEO-трекера.
-Один самодостаточный файл dashboard.html: данные инлайнятся как JSON,
-графики — Chart.js с CDN (нужен интернет при открытии).
+HTML dashboard generator for the GEO tracker.
+A single self-contained dashboard.html: data is inlined as JSON,
+charts are Chart.js from a CDN (opening the file requires internet).
 """
 
 import json
 from datetime import datetime
 from pathlib import Path
 
-# Фирменные цвета доменов на графиках (стабильные между отчётами)
+# Brand colors for domains on charts (stable across reports)
 DOMAIN_COLORS = ["#FF5C1F", "#1F7A8C", "#6A4C93", "#2A9D8F", "#E0A100", "#D62246"]
 
 
@@ -38,7 +38,7 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
     engines = sorted({r["engine"] for r in ok})
     latest = dates[-1]
 
-    # Тренд: общий SOV домена по датам (доля всех ok-запросов даты с попаданием)
+    # Trend: overall domain SOV by date (share of the date's ok queries with a hit)
     trend = {d: [] for d in domains}
     for date in dates:
         day = [r for r in ok if r["run_date"] == date]
@@ -46,7 +46,7 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
             trend[d].append(
                 round(100 * sum(_hit(r, d) for r in day) / len(day), 1) if day else None)
 
-    # Разбивка по движкам (последний прогон): SOV домена внутри движка
+    # Per-engine breakdown (latest run): domain SOV within the engine
     by_engine = {}
     for e in engines:
         day = [r for r in ok if r["run_date"] == latest and r["engine"] == e]
@@ -60,7 +60,7 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
           if latest_ok else 0.0) for d in domains),
         key=lambda x: -x[1])
 
-    # Последние попадания: какие запросы реально вытащили домены
+    # Recent hits: which queries actually surfaced the domains
     recent_hits = []
     for r in reversed(latest_ok):
         hit_domains = [d for d in domains if _hit(r, d)]

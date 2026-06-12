@@ -1,26 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-Пример конфига GEO-трекера. Скопируй в queries.py и впиши свои домены и запросы:
+Example GEO tracker config. Copy to queries.py and fill in your domains and queries:
 
     cp queries.example.py queries.py
 
-queries.py в гит не попадает (.gitignore) — это локальная конфигурация.
+queries.py is gitignored — it is local configuration.
 
-Структура NICHES:
-  "ключ_ниши": {
-      "title": "человекочитаемое имя для отчёта",
-      "primary_domain": "домен, чью видимость в этой нише меряем",
-      "queries": ["запрос1", "запрос2", ...],
+NICHES structure:
+  "niche_key": {
+      "title": "human-readable name for reports",
+      "primary_domain": "the domain whose visibility this niche measures",
+      "queries": ["query1", "query2", ...],
   }
 
-В каждом ответе движка проверяются ВСЕ домены из DOMAINS (а не только primary),
-поэтому видно и кросс-цитирование доменов в чужих нишах.
+Every engine answer is checked against ALL domains in DOMAINS (not just the
+niche's primary one), so cross-citation in other niches is visible too.
 
-Демо-ниши ниже подобраны так, чтобы первый прогон сразу дал попадания:
-Wikipedia и Stack Overflow часто цитируются ИИ.
+The demo niches below are picked so the first run produces hits right away:
+Wikipedia and Stack Overflow are frequently cited by AI engines.
+Queries can be in any language — the demo mixes English and Russian.
 """
 
-# Все отслеживаемые домены (без http/www)
+# All tracked domains (no http/www)
 DOMAINS = [
     "wikipedia.org",
     "stackoverflow.com",
