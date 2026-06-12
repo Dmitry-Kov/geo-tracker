@@ -1,0 +1,17 @@
+# секреты и локальная конфигурация
+.env
+queries.py
+
+# данные замеров и отчёты (содержат клиентские домены)
+results.csv
+dashboard*.html
+manual_*.csv
+geo_report_*.docx
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
