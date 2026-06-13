@@ -12,18 +12,40 @@ from pathlib import Path
 # Brand colors for domains on charts (stable across reports)
 DOMAIN_COLORS = ["#FF5C1F", "#1F7A8C", "#6A4C93", "#2A9D8F", "#E0A100", "#D62246"]
 
+# A trend point is drawn for a date only if that date covers at least this
+# fraction of the busiest date's ok-answer count. Keeps gap-fill days (a small
+# single-engine top-up) from rendering as false collapses in the trend.
+TREND_MIN_FRACTION = 0.5
+
 
 def _hit(row: dict, domain: str) -> bool:
     return row.get(f"src_{domain}") == "1" or row.get(f"txt_{domain}") == "1"
 
 
-def _sov(rows: list, domains: list, niches: dict, *, run_date=None, engine=None) -> dict:
+def _ts(row: dict) -> str:
+    # run_ts is ISO ("2026-06-12T17:14:00Z"), sortable as a string; fall back to date
+    return row.get("run_ts") or row.get("run_date") or ""
+
+
+def _latest_per_pair(ok: list) -> list:
+    """Newest ok answer for each (engine, niche, query) pair, regardless of date.
+
+    This is the "current visibility" snapshot: each pair contributes its freshest
+    measurement, so a partial gap-fill day doesn't wipe out pairs last run earlier.
+    """
+    latest = {}
+    for r in ok:
+        key = (r["engine"], r["niche"], r["query"])
+        if key not in latest or _ts(r) >= _ts(latest[key]):
+            latest[key] = r
+    return list(latest.values())
+
+
+def _sov_rows(rows: list, domains: list, niches: dict) -> dict:
+    """{niche: {domain: % of the niche's rows with a hit}} over the given rows."""
     out = {}
     for niche in niches:
-        subset = [r for r in rows
-                  if r["niche"] == niche and r["status"] == "ok"
-                  and (run_date is None or r["run_date"] == run_date)
-                  and (engine is None or r["engine"] == engine)]
+        subset = [r for r in rows if r["niche"] == niche]
         if not subset:
             continue
         out[niche] = {d: round(100 * sum(_hit(r, d) for r in subset) / len(subset), 1)
@@ -38,36 +60,47 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
     engines = sorted({r["engine"] for r in ok})
     latest = dates[-1]
 
-    # Trend: overall domain SOV by date (share of the date's ok queries with a hit)
+    # Current snapshot: freshest ok answer per pair, used by the matrix,
+    # the engine breakdown, the leaderboard and the hits list.
+    current = _latest_per_pair(ok)
+
+    # Trend: overall domain SOV by date — but only for dates whose coverage is
+    # comparable to the busiest date, so gap-fill days are left as gaps (null).
+    date_counts = {date: sum(1 for r in ok if r["run_date"] == date) for date in dates}
+    threshold = TREND_MIN_FRACTION * (max(date_counts.values()) if date_counts else 0)
     trend = {d: [] for d in domains}
+    trend_hidden = 0
     for date in dates:
         day = [r for r in ok if r["run_date"] == date]
-        for d in domains:
-            trend[d].append(
-                round(100 * sum(_hit(r, d) for r in day) / len(day), 1) if day else None)
+        if day and len(day) >= threshold:
+            for d in domains:
+                trend[d].append(round(100 * sum(_hit(r, d) for r in day) / len(day), 1))
+        else:
+            for d in domains:
+                trend[d].append(None)
+            trend_hidden += 1
 
-    # Per-engine breakdown (latest run): domain SOV within the engine
+    # Per-engine breakdown over the current snapshot
     by_engine = {}
     for e in engines:
-        day = [r for r in ok if r["run_date"] == latest and r["engine"] == e]
-        if day:
-            by_engine[e] = {d: round(100 * sum(_hit(r, d) for r in day) / len(day), 1)
+        sub = [r for r in current if r["engine"] == e]
+        if sub:
+            by_engine[e] = {d: round(100 * sum(_hit(r, d) for r in sub) / len(sub), 1)
                             for d in domains}
 
-    latest_ok = [r for r in ok if r["run_date"] == latest]
     leaderboard = sorted(
-        ((d, round(100 * sum(_hit(r, d) for r in latest_ok) / len(latest_ok), 1)
-          if latest_ok else 0.0) for d in domains),
+        ((d, round(100 * sum(_hit(r, d) for r in current) / len(current), 1)
+          if current else 0.0) for d in domains),
         key=lambda x: -x[1])
 
-    # Recent hits: which queries actually surfaced the domains
-    recent_hits = []
-    for r in reversed(latest_ok):
+    # Hits from the current snapshot, freshest first
+    current_hits = []
+    for r in sorted(current, key=_ts, reverse=True):
         hit_domains = [d for d in domains if _hit(r, d)]
         if hit_domains:
-            recent_hits.append({"engine": r["engine"], "niche": r["niche"],
-                                "query": r["query"], "domains": hit_domains})
-        if len(recent_hits) >= 12:
+            current_hits.append({"engine": r["engine"], "niche": r["niche"],
+                                 "query": r["query"], "domains": hit_domains})
+        if len(current_hits) >= 12:
             break
 
     return {
@@ -81,12 +114,13 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
                    for k, v in niches.items()},
         "n_answers": len(ok),
         "n_errors": len(errors),
-        "n_latest": len(latest_ok),
-        "sov_latest": _sov(rows, domains, niches, run_date=latest),
+        "n_pairs": len(current),
+        "trend_hidden": trend_hidden,
+        "sov_current": _sov_rows(current, domains, niches),
         "trend": trend,
         "by_engine": by_engine,
         "leaderboard": leaderboard,
-        "recent_hits": recent_hits,
+        "current_hits": current_hits,
     }
 
 
@@ -152,23 +186,23 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <div class="kpis" id="kpis"></div>
 
 <h2>Видимость по нишам</h2>
-<div class="sub">Доля запросов ниши, где домен попал в источники или текст ответа ИИ. Последний прогон: <span id="latestDate"></span>.</div>
+<div class="sub">Доля запросов ниши, где домен попал в источники или текст ответа ИИ. Текущий срез: самый свежий ответ по каждой паре (движок × ниша × запрос), независимо от даты прогона.</div>
 <table class="matrix" id="matrix"></table>
 <div class="legend"><span class="pr"></span>целевой домен ниши · интенсивность заливки — уровень видимости</div>
 
 <h2>Динамика share of voice</h2>
-<div class="sub">Общая видимость каждого домена по датам прогонов (все ниши и движки).</div>
+<div class="sub" id="trendSub">Общая видимость каждого домена по датам прогонов (все ниши и движки).</div>
 <div class="card"><canvas id="trendChart"></canvas></div>
 
 <div class="grid2">
   <div>
     <h2>Разбивка по движкам</h2>
-    <div class="sub">Последний прогон: где какой домен виден.</div>
+    <div class="sub">Текущий срез: где какой домен виден (свежайший ответ каждой пары).</div>
     <div class="card"><canvas id="engineChart"></canvas></div>
   </div>
   <div>
     <h2>Свежие попадания</h2>
-    <div class="sub">Запросы последнего прогона, вытащившие наши домены.</div>
+    <div class="sub">Запросы из текущего среза, вытащившие наши домены.</div>
     <div class="card"><ul class="hits" id="hits"></ul></div>
   </div>
 </div>
@@ -181,7 +215,12 @@ const D = __DATA__;
 
 document.getElementById('meta').textContent =
   `период ${D.dates[0]} — ${D.latest} · сформирован ${D.generated}`;
-document.getElementById('latestDate').textContent = D.latest;
+
+/* Подпись тренда: предупреждаем о скрытых неполных датах */
+if (D.trend_hidden > 0) {
+  document.getElementById('trendSub').textContent +=
+    ` Даты с неполным покрытием (догоны) не отображаются: ${D.trend_hidden} из ${D.dates.length}.`;
+}
 
 /* KPI */
 const lead = D.leaderboard[0];
@@ -189,7 +228,7 @@ document.getElementById('kpis').innerHTML = [
   [D.dates.length, 'прогонов в истории'],
   [D.n_answers, 'ответов ИИ проанализировано'],
   [D.engines.join(' · '), 'движки'],
-  [`${lead[0]} — ${lead[1]}%`, 'лидер видимости', true],
+  [`${lead[0]} — ${lead[1]}%`, 'лидер видимости (текущий срез)', true],
 ].map(([v, l, acc]) =>
   `<div class="kpi"><b class="${acc ? 'acc' : ''}">${v}</b><span>${l}</span></div>`).join('');
 
@@ -200,7 +239,7 @@ const fg = p => p > 55 ? '#fff' : 'var(--ink)';
 let html = '<tr><th></th>' +
   D.domains.map(d => `<th class="dom">${d}</th>`).join('') + '</tr>';
 for (const [niche, info] of Object.entries(D.niches)) {
-  const row = D.sov_latest[niche];
+  const row = D.sov_current[niche];
   if (!row) continue;
   html += `<tr><td class="niche">${info.title}</td>` + D.domains.map(d => {
     const p = row[d], pr = d === info.primary ? ' primary' : '';
@@ -245,15 +284,15 @@ new Chart(document.getElementById('engineChart'), {
 });
 
 /* Попадания */
-document.getElementById('hits').innerHTML = D.recent_hits.length
-  ? D.recent_hits.map(h =>
+document.getElementById('hits').innerHTML = D.current_hits.length
+  ? D.current_hits.map(h =>
       `<li><span class="eng">${h.engine} · ${D.niches[h.niche].title}</span><br>` +
       `«${h.query}»` +
       h.domains.map(d => `<span class="tag">${d}</span>`).join('') + '</li>').join('')
-  : '<li>В последнем прогоне домены в ответах не найдены.</li>';
+  : '<li>В текущем срезе домены в ответах не найдены.</li>';
 
 document.getElementById('foot').textContent =
-  `Запросов в последнем прогоне: ${D.n_latest}. Ошибок API за всю историю: ${D.n_errors}. ` +
+  `Пар в текущем срезе: ${D.n_pairs}. Ошибок API за всю историю: ${D.n_errors}. ` +
   `Источник данных: results.csv · geo_tracker.py`;
 </script>
 </body>
