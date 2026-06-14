@@ -30,7 +30,7 @@ DOMAINS = [
 
 NICHES = {
     "knowledge": {
-        "title": "Общие знания",
+        "title": "General knowledge",
         "primary_domain": "wikipedia.org",
         "queries": [
             "кто изобрёл телефон",
@@ -39,7 +39,7 @@ NICHES = {
         ],
     },
     "dev": {
-        "title": "Разработка",
+        "title": "Development",
         "primary_domain": "stackoverflow.com",
         "queries": [
             "how to reverse a list in python",

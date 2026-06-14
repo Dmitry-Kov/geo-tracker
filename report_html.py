@@ -125,11 +125,11 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
 
 
 TEMPLATE = """<!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GEO-монитор · Optimize.uz</title>
+<title>GEO Monitor · Optimize.uz</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
@@ -179,30 +179,30 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <body>
 <div class="wrap">
 <header><div class="brand">
-  <h1>Optimize<span class="dot">.</span>uz&ensp;GEO-монитор</h1>
+  <h1>Optimize<span class="dot">.</span>uz&ensp;GEO Monitor</h1>
   <div class="meta" id="meta"></div>
 </div></header>
 
 <div class="kpis" id="kpis"></div>
 
-<h2>Видимость по нишам</h2>
-<div class="sub">Доля запросов ниши, где домен попал в источники или текст ответа ИИ. Текущий срез: самый свежий ответ по каждой паре (движок × ниша × запрос), независимо от даты прогона.</div>
+<h2>Visibility by niche</h2>
+<div class="sub">Share of the niche's queries where the domain appeared in the answer's sources or text. Current snapshot: the freshest answer per pair (engine × niche × query), regardless of run date.</div>
 <table class="matrix" id="matrix"></table>
-<div class="legend"><span class="pr"></span>целевой домен ниши · интенсивность заливки — уровень видимости</div>
+<div class="legend"><span class="pr"></span>niche's primary domain · fill intensity — visibility level</div>
 
-<h2>Динамика share of voice</h2>
-<div class="sub" id="trendSub">Общая видимость каждого домена по датам прогонов (все ниши и движки).</div>
+<h2>Share of voice over time</h2>
+<div class="sub" id="trendSub">Overall visibility of each domain by run date (all niches and engines).</div>
 <div class="card"><canvas id="trendChart"></canvas></div>
 
 <div class="grid2">
   <div>
-    <h2>Разбивка по движкам</h2>
-    <div class="sub">Текущий срез: где какой домен виден (свежайший ответ каждой пары).</div>
+    <h2>Engine breakdown</h2>
+    <div class="sub">Current snapshot: where each domain is visible (freshest answer per pair).</div>
     <div class="card"><canvas id="engineChart"></canvas></div>
   </div>
   <div>
-    <h2>Свежие попадания</h2>
-    <div class="sub">Запросы из текущего среза, вытащившие наши домены.</div>
+    <h2>Recent hits</h2>
+    <div class="sub">Queries from the current snapshot that surfaced our domains.</div>
     <div class="card"><ul class="hits" id="hits"></ul></div>
   </div>
 </div>
@@ -214,25 +214,25 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 const D = __DATA__;
 
 document.getElementById('meta').textContent =
-  `период ${D.dates[0]} — ${D.latest} · сформирован ${D.generated}`;
+  `period ${D.dates[0]} — ${D.latest} · generated ${D.generated}`;
 
-/* Подпись тренда: предупреждаем о скрытых неполных датах */
+/* Trend caption: warn about hidden partial dates */
 if (D.trend_hidden > 0) {
   document.getElementById('trendSub').textContent +=
-    ` Даты с неполным покрытием (догоны) не отображаются: ${D.trend_hidden} из ${D.dates.length}.`;
+    ` Dates with partial coverage (gap-fills) are not shown: ${D.trend_hidden} of ${D.dates.length}.`;
 }
 
 /* KPI */
 const lead = D.leaderboard[0];
 document.getElementById('kpis').innerHTML = [
-  [D.dates.length, 'прогонов в истории'],
-  [D.n_answers, 'ответов ИИ проанализировано'],
-  [D.engines.join(' · '), 'движки'],
-  [`${lead[0]} — ${lead[1]}%`, 'лидер видимости (текущий срез)', true],
+  [D.dates.length, 'runs in history'],
+  [D.n_answers, 'AI answers analyzed'],
+  [D.engines.join(' · '), 'engines'],
+  [`${lead[0]} — ${lead[1]}%`, 'visibility leader (current snapshot)', true],
 ].map(([v, l, acc]) =>
   `<div class="kpi"><b class="${acc ? 'acc' : ''}">${v}</b><span>${l}</span></div>`).join('');
 
-/* Матрица ниши × домены */
+/* Niche × domain matrix */
 const shade = p => p === 0 ? 'transparent'
   : `rgba(255,92,31,${(0.12 + 0.78 * p / 100).toFixed(2)})`;
 const fg = p => p > 55 ? '#fff' : 'var(--ink)';
@@ -248,7 +248,7 @@ for (const [niche, info] of Object.entries(D.niches)) {
 }
 document.getElementById('matrix').innerHTML = html;
 
-/* Тренд */
+/* Trend */
 new Chart(document.getElementById('trendChart'), {
   type: 'line',
   data: {
@@ -266,7 +266,7 @@ new Chart(document.getElementById('trendChart'), {
   },
 });
 
-/* По движкам */
+/* By engine */
 new Chart(document.getElementById('engineChart'), {
   type: 'bar',
   data: {
@@ -283,17 +283,17 @@ new Chart(document.getElementById('engineChart'), {
   },
 });
 
-/* Попадания */
+/* Hits */
 document.getElementById('hits').innerHTML = D.current_hits.length
   ? D.current_hits.map(h =>
       `<li><span class="eng">${h.engine} · ${D.niches[h.niche].title}</span><br>` +
-      `«${h.query}»` +
+      `“${h.query}”` +
       h.domains.map(d => `<span class="tag">${d}</span>`).join('') + '</li>').join('')
-  : '<li>В текущем срезе домены в ответах не найдены.</li>';
+  : '<li>No domains found in answers in the current snapshot.</li>';
 
 document.getElementById('foot').textContent =
-  `Пар в текущем срезе: ${D.n_pairs}. Ошибок API за всю историю: ${D.n_errors}. ` +
-  `Источник данных: results.csv · geo_tracker.py`;
+  `Pairs in current snapshot: ${D.n_pairs}. API errors across all history: ${D.n_errors}. ` +
+  `Data source: results.csv · geo_tracker.py`;
 </script>
 </body>
 </html>

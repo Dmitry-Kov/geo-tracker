@@ -177,34 +177,34 @@ def build_docx(out_path: Path) -> Path:
     style_run(p.add_run("Optimize"), font=F_HEAD, size=22, bold=True)
     style_run(p.add_run("."), font=F_HEAD, size=22, bold=True, color=ACCENT)
     style_run(p.add_run("uz"), font=F_HEAD, size=22, bold=True)
-    style_run(p.add_run("  GEO-монитор"), font=F_HEAD, size=22, bold=True)
+    style_run(p.add_run("  GEO Monitor"), font=F_HEAD, size=22, bold=True)
     hairline(p, color="16181D")
     para(doc,
-         f"Отчёт о цитируемости доменов в ответах ИИ · последний прогон {latest} · "
-         f"сформирован {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+         f"Domain citation report in AI answers · latest run {latest} · "
+         f"generated {datetime.now().strftime('%d.%m.%Y %H:%M')}",
          font=F_MONO, size=8.5, color=MUTED, space_after=12)
 
     # KPI row
     kpi = make_table(doc, 2, 4)
     for i, (val, label) in enumerate([
-            (str(len(latest_ok)), f"ответов в прогоне {latest}"),
-            (str(len(engines)), "движков: " + ", ".join(engines)),
+            (str(len(latest_ok)), f"answers in run {latest}"),
+            (str(len(engines)), "engines: " + ", ".join(engines)),
             (str(sum(1 for r in latest_ok for d in DOMAINS if _hit(r, d))),
-             "попаданий доменов"),
-            (f"{len(dates)}", f"дат в истории ({dates[0]} … {latest})")]):
+             "domain hits"),
+            (f"{len(dates)}", f"dates in history ({dates[0]} … {latest})")]):
         fill_cell(kpi.rows[0].cells[i], val, font=F_MONO, size=16, bold=True,
                   color=ACCENT if i == 2 else INK)
         fill_cell(kpi.rows[1].cells[i], label, size=8, color=MUTED)
 
     # Visibility matrix by niche
-    heading(doc, "Видимость по нишам")
-    para(doc, "Доля запросов ниши, где домен попал в источники (src) или текст "
-              "ответа (txt). ★ — целевой домен ниши.",
+    heading(doc, "Visibility by niche")
+    para(doc, "Share of the niche's queries where the domain appeared in the "
+              "answer's sources (src) or text (txt). ★ — niche's primary domain.",
          size=9, color=MUTED)
     short = {d: d.split(".")[0] for d in DOMAINS}
     m = make_table(doc, len([n for n in NICHES if sov(latest_ok, niche=n)]) + 1,
                    len(DOMAINS) + 1)
-    header_row(m, ["ниша"] + [short[d] for d in DOMAINS])
+    header_row(m, ["niche"] + [short[d] for d in DOMAINS])
     r_i = 1
     for niche, cfg in NICHES.items():
         by_dom = sov(latest_ok, niche=niche)
@@ -217,25 +217,25 @@ def build_docx(out_path: Path) -> Path:
         r_i += 1
 
     # Overall leaderboard
-    heading(doc, "Общий зачёт по доменам")
+    heading(doc, "Domain leaderboard")
     total = sov(latest_ok) or {}
     lb = sorted(total.items(), key=lambda x: -x[1])
     t = make_table(doc, len(lb) + 1, 3)
-    header_row(t, ["домен", "SOV", "комментарий"])
+    header_row(t, ["domain", "SOV", "note"])
     for i, (d, pct) in enumerate(lb, start=1):
         niches_hit = sorted({r["niche"] for r in latest_ok if _hit(r, d)})
-        note = ("ниши: " + ", ".join(NICHES[n]["title"] for n in niches_hit)
-                if niches_hit else "не цитируется")
+        note = ("niches: " + ", ".join(NICHES[n]["title"] for n in niches_hit)
+                if niches_hit else "not cited")
         fill_cell(t.rows[i].cells[0], d, font=F_MONO, size=9, center=False)
         pct_cell(t.rows[i].cells[1], pct)
         fill_cell(t.rows[i].cells[2], note, size=8.5,
                   color=INK if niches_hit else MUTED, center=False)
 
     # Per-engine breakdown
-    heading(doc, "Сравнение движков")
+    heading(doc, "Engine comparison")
     e_rows = [e for e in engines if sov(latest_ok, engine=e)]
     et = make_table(doc, len(e_rows) + 1, len(DOMAINS) + 2)
-    header_row(et, ["движок", "n"] + [short[d] for d in DOMAINS])
+    header_row(et, ["engine", "n"] + [short[d] for d in DOMAINS])
     for i, e in enumerate(e_rows, start=1):
         sub_n = sum(1 for r in latest_ok if r["engine"] == e)
         by_dom = sov(latest_ok, engine=e)
@@ -245,7 +245,7 @@ def build_docx(out_path: Path) -> Path:
             pct_cell(et.rows[i].cells[c_i], by_dom[d])
 
     # Auto-derived findings from the data
-    heading(doc, "Ключевые наблюдения")
+    heading(doc, "Key observations")
     consensus = []
     single = []
     for d in DOMAINS:
@@ -253,27 +253,27 @@ def build_docx(out_path: Path) -> Path:
             who = {r["engine"] for r in latest_ok
                    if r["niche"] == niche and _hit(r, d)}
             if len(who) == len(engines) > 1:
-                consensus.append(f"{d} в нише «{NICHES[niche]['title']}» — "
-                                 f"цитируют все движки")
+                consensus.append(f"{d} in niche “{NICHES[niche]['title']}” — "
+                                 f"cited by all engines")
             elif len(who) == 1:
-                single.append(f"{d} в нише «{NICHES[niche]['title']}» — "
-                              f"только {next(iter(who))}")
+                single.append(f"{d} in niche “{NICHES[niche]['title']}” — "
+                              f"only {next(iter(who))}")
     zeros = [d for d in DOMAINS if not any(_hit(r, d) for r in latest_ok)]
     for line in consensus:
         para(doc, "✓ " + line, size=9.5, space_after=3)
     for line in single:
         para(doc, "◐ " + line, size=9.5, color=MUTED, space_after=3)
     if zeros:
-        para(doc, "✗ Не цитируются ни одним движком: " + ", ".join(zeros),
+        para(doc, "✗ Not cited by any engine: " + ", ".join(zeros),
              size=9.5, bold=True, color=ACCENT, space_after=3)
 
     # Hits from the latest run
-    heading(doc, "Запросы с попаданиями (последний прогон)")
+    heading(doc, "Queries with hits (latest run)")
     hits = [(r, [d for d in DOMAINS if _hit(r, d)])
             for r in latest_ok if any(_hit(r, d) for d in DOMAINS)]
     if hits:
         ht = make_table(doc, len(hits) + 1, 4)
-        header_row(ht, ["движок", "ниша", "запрос", "домены"])
+        header_row(ht, ["engine", "niche", "query", "domains"])
         for i, (r, ds) in enumerate(hits, start=1):
             fill_cell(ht.rows[i].cells[0], r["engine"], font=F_MONO, size=8.5,
                       center=False)
@@ -282,14 +282,14 @@ def build_docx(out_path: Path) -> Path:
             fill_cell(ht.rows[i].cells[3], ", ".join(ds), font=F_MONO, size=8.5,
                       color=ACCENT, center=False, fill=ACCENT_SOFT)
     else:
-        para(doc, "Попаданий нет.", size=9.5, color=MUTED)
+        para(doc, "No hits.", size=9.5, color=MUTED)
 
     # Footer
     p = para(doc, "", space_before=16)
     hairline(p)
-    para(doc, "Optimize.uz · GEO-трекер · только официальные API (Gemini, "
-              "Perplexity, OpenAI). ИИ недетерминирован: смотрите тренд по "
-              "нескольким прогонам, а не единичный замер.",
+    para(doc, "Optimize.uz · GEO tracker · official APIs only (Gemini, "
+              "Perplexity, OpenAI). AI is non-deterministic: read the trend "
+              "across several runs, not a single measurement.",
          font=F_MONO, size=8, color=MUTED)
 
     doc.save(out_path)
@@ -297,14 +297,14 @@ def build_docx(out_path: Path) -> Path:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Экспорт отчёта в DOCX Optimize.uz")
-    parser.add_argument("--out", help="путь к выходному .docx")
+    parser = argparse.ArgumentParser(description="Export the report to an Optimize.uz DOCX")
+    parser.add_argument("--out", help="path for the output .docx")
     args = parser.parse_args()
     if not RESULTS_CSV.exists():
-        raise SystemExit("results.csv не найден — сначала: python geo_tracker.py run")
+        raise SystemExit("results.csv not found — run first: python geo_tracker.py run")
     default = BASE_DIR / f"geo_report_{datetime.now().strftime('%Y-%m-%d')}.docx"
     out = build_docx(Path(args.out) if args.out else default)
-    print(f"Готово: {out}")
+    print(f"Done: {out}")
 
 
 if __name__ == "__main__":

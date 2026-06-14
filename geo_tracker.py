@@ -135,22 +135,22 @@ def _post_with_retries(url: str, *, headers: dict, payload: dict) -> dict:
             if resp.status_code == 429:
                 body = resp.text.strip()
                 quotas, delay = _parse_429(body)
-                qname = "; ".join(quotas) or "квота не указана в details"
+                qname = "; ".join(quotas) or "quota not specified in details"
                 daily = (any("PerDay" in q for q in quotas)
                          or ("RESOURCE_EXHAUSTED" in body and not quotas and delay is None))
                 # Give a daily quota one chance to sit out a short RetryInfo
                 # (the window is sometimes sliding); a repeat 429 stops retries.
                 if daily and (attempt >= 1 or delay is None or delay > 120):
-                    raise QuotaExhausted(f"суточная квота: {qname}")
+                    raise QuotaExhausted(f"daily quota: {qname}")
                 wait = (int(delay) + 2 if delay and delay <= 120
                         else THROTTLE_BACKOFF[min(attempt, len(THROTTLE_BACKOFF) - 1)])
-                print(f"    429 [{qname}], жду {wait}с…")
+                print(f"    429 [{qname}], waiting {wait}s…")
                 time.sleep(wait)
                 last_err = RuntimeError(f"429: {qname}")
                 continue
             if resp.status_code == 503:
                 wait = THROTTLE_BACKOFF[min(attempt, len(THROTTLE_BACKOFF) - 1)]
-                print(f"    503 high demand, жду {wait}с…")
+                print(f"    503 high demand, waiting {wait}s…")
                 time.sleep(wait)
                 last_err = RuntimeError(f"503: {resp.text.strip()[:300]}")
                 continue
@@ -160,7 +160,7 @@ def _post_with_retries(url: str, *, headers: dict, payload: dict) -> dict:
             last_err = e
             if attempt < RETRIES - 1:
                 time.sleep(BACKOFF[attempt])
-    raise RuntimeError(f"запрос не удался после {RETRIES} попыток: {last_err}")
+    raise RuntimeError(f"request failed after {RETRIES} attempts: {last_err}")
 
 
 def ask_gemini(query: str) -> dict:
@@ -330,36 +330,36 @@ def cmd_run(args) -> None:
         requested = [e.strip() for e in args.engines.split(",") if e.strip()]
         unknown = [e for e in requested if e not in ENGINES]
         if unknown:
-            sys.exit(f"Неизвестные движки: {', '.join(unknown)}. Доступны: {', '.join(ENGINES)}")
+            sys.exit(f"Unknown engines: {', '.join(unknown)}. Available: {', '.join(ENGINES)}")
         missing = [e for e in requested if e not in engines]
         if missing:
-            sys.exit(f"Нет ключей для: {', '.join(missing)}. Добавь в .env и попробуй снова.")
+            sys.exit(f"No keys for: {', '.join(missing)}. Add them to .env and try again.")
         engines = requested
     if not engines:
-        sys.exit("Не найден ни один API-ключ. Создай .env по образцу .env.example.\n"
-                 "Самый быстрый бесплатный старт: GEMINI_API_KEY с aistudio.google.com")
+        sys.exit("No API key found. Create .env from the .env.example template.\n"
+                 "Fastest free start: GEMINI_API_KEY from aistudio.google.com")
 
     niches = list(NICHES)
     if args.niches:
         requested = [n.strip() for n in args.niches.split(",") if n.strip()]
         unknown = [n for n in requested if n not in NICHES]
         if unknown:
-            sys.exit(f"Неизвестные ниши: {', '.join(unknown)}. Доступны: {', '.join(NICHES)}")
+            sys.exit(f"Unknown niches: {', '.join(unknown)}. Available: {', '.join(NICHES)}")
         niches = requested
 
-    done_today = set()
+    done_already = set()
     if args.resume:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        done_today = {(r["engine"], r["niche"], r["query"]) for r in load_results()
-                      if r["run_date"] == today and r["status"] == "ok"}
-        if done_today:
-            print(f"--resume: за {today} уже есть {len(done_today)} ok-ответов, пропускаю их")
+        done_already = {(r["engine"], r["niche"], r["query"]) for r in load_results()
+                        if r["status"] == "ok"}
+        if done_already:
+            print(f"--resume: {len(done_already)} ok answers already in history, "
+                  f"skipping them — filling the unfinished pairs")
 
     total = 0
     for n in niches:
         qs = NICHES[n]["queries"][:args.limit] if args.limit else NICHES[n]["queries"]
-        total += sum(1 for q in qs for e in engines if (e, n, q) not in done_today)
-    print(f"Движки: {', '.join(engines)} | Ниши: {', '.join(niches)} | Запросов к API: {total}\n")
+        total += sum(1 for q in qs for e in engines if (e, n, q) not in done_already)
+    print(f"Engines: {', '.join(engines)} | Niches: {', '.join(niches)} | API calls: {total}\n")
 
     done, hits_total = 0, 0
     dead = set()  # engines dropped from the run due to exhausted quota
@@ -369,7 +369,7 @@ def cmd_run(args) -> None:
             queries = queries[:args.limit]
         for query in queries:
             for engine in engines:
-                if engine in dead or (engine, niche, query) in done_today:
+                if engine in dead or (engine, niche, query) in done_already:
                     continue
                 done += 1
                 label = f"[{done}/{total}] {engine:<10} {niche:<12} {query[:50]}"
@@ -385,8 +385,8 @@ def cmd_run(args) -> None:
                     dead.add(engine)
                     row = make_row(engine, niche, query, status=f"error: {e}")
                     print(f"{label} ✗ {e}")
-                    print(f"    !! {engine}: квота исчерпана, движок снят с прогона. "
-                          f"Дожать после сброса квоты: python geo_tracker.py run --resume")
+                    print(f"    !! {engine}: quota exhausted, engine dropped from the run. "
+                          f"Finish after the quota resets: python geo_tracker.py run --resume")
                     append_row(row)
                     continue
                 except Exception as e:  # noqa: BLE001 — record the error and move on
@@ -397,12 +397,12 @@ def cmd_run(args) -> None:
             if dead >= set(engines):
                 break
         if dead >= set(engines):
-            print("\nВсе движки сняты с прогона из-за квот. "
-                  "Дожать остаток: python geo_tracker.py run --resume")
+            print("\nAll engines dropped from the run due to quotas. "
+                  "Finish the rest: python geo_tracker.py run --resume")
             break
 
-    print(f"\nГотово. Попаданий доменов: {hits_total}. История: {RESULTS_CSV.name}")
-    print("Сводка и дашборд: python geo_tracker.py report")
+    print(f"\nDone. Domain hits: {hits_total}. History: {RESULTS_CSV.name}")
+    print("Summary and dashboard: python geo_tracker.py report")
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +430,7 @@ def share_of_voice(rows: list, *, run_date: str = None, engine: str = None) -> d
 def cmd_report(args) -> None:
     rows = load_results()
     if not rows:
-        sys.exit("results.csv пуст — сначала запусти: python geo_tracker.py run")
+        sys.exit("results.csv is empty — run first: python geo_tracker.py run")
 
     dates = sorted({r["run_date"] for r in rows})
     engines = sorted({r["engine"] for r in rows})
@@ -438,12 +438,12 @@ def cmd_report(args) -> None:
     ok_rows = [r for r in rows if r["status"] == "ok"]
     err_rows = [r for r in rows if r["status"] != "ok"]
 
-    print(f"История: {len(dates)} дат ({dates[0]} … {latest}), "
-          f"{len(ok_rows)} ответов, {len(err_rows)} ошибок, движки: {', '.join(engines)}\n")
+    print(f"History: {len(dates)} dates ({dates[0]} … {latest}), "
+          f"{len(ok_rows)} answers, {len(err_rows)} errors, engines: {', '.join(engines)}\n")
 
-    print(f"=== Share of voice, последний прогон {latest} (src или txt, любой движок) ===")
+    print(f"=== Share of voice, latest run {latest} (src or txt, any engine) ===")
     sov = share_of_voice(rows, run_date=latest)
-    header = "ниша".ljust(14) + "".join(d.split(".")[0][:12].rjust(13) for d in DOMAINS)
+    header = "niche".ljust(14) + "".join(d.split(".")[0][:12].rjust(13) for d in DOMAINS)
     print(header)
     for niche, by_domain in sov.items():
         primary = NICHES[niche]["primary_domain"]
@@ -454,9 +454,9 @@ def cmd_report(args) -> None:
                 val = "*" + val
             cells += val.rjust(13)
         print(niche.ljust(14) + cells)
-    print("(* — целевой домен ниши)\n")
+    print("(* — niche's primary domain)\n")
 
-    print("=== Общий зачёт по доменам (последний прогон, % от всех запросов) ===")
+    print("=== Domain leaderboard (latest run, % of all queries) ===")
     subset = [r for r in ok_rows if r["run_date"] == latest]
     leaderboard = []
     for d in DOMAINS:
@@ -467,7 +467,7 @@ def cmd_report(args) -> None:
 
     out = Path(args.out) if args.out else DASHBOARD_HTML
     build_dashboard(rows, DOMAINS, NICHES, out)
-    print(f"\nДашборд: {out}")
+    print(f"\nDashboard: {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -487,9 +487,9 @@ def cmd_manual_export(args) -> None:
             for q in queries:
                 writer.writerow({"engine": engine, "niche": niche, "query": q,
                                  "domains_in_sources": "", "domains_in_text": ""})
-    print(f"Чеклист: {out.name}")
-    print("Прогони запросы руками, впиши домены через запятую (например: pc.uz, sprav.uz),\n"
-          "затем: python geo_tracker.py manual-import " + out.name)
+    print(f"Checklist: {out.name}")
+    print("Run the queries by hand, fill in domains comma-separated (e.g. pc.uz, sprav.uz),\n"
+          "then: python geo_tracker.py manual-import " + out.name)
 
 
 def cmd_manual_import(args) -> None:
@@ -497,7 +497,7 @@ def cmd_manual_import(args) -> None:
     if not path.exists():
         path = BASE_DIR / args.file
     if not path.exists():
-        sys.exit(f"Файл не найден: {args.file}")
+        sys.exit(f"File not found: {args.file}")
 
     imported = 0
     with path.open(newline="", encoding="utf-8-sig") as f:
@@ -510,7 +510,7 @@ def cmd_manual_import(args) -> None:
                         row[prefix + d] = 1
             append_row(row)
             imported += 1
-    print(f"Импортировано строк: {imported} → {RESULTS_CSV.name}")
+    print(f"Imported rows: {imported} → {RESULTS_CSV.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -518,30 +518,31 @@ def cmd_manual_import(args) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="GEO-трекер Optimize.uz")
+    parser = argparse.ArgumentParser(description="GEO tracker — AI answer citation monitoring")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="прогнать матрицу запросов через API")
-    p_run.add_argument("--engines", help="через запятую: gemini,perplexity,openai")
-    p_run.add_argument("--niches", help="через запятую: tech,medical,…")
-    p_run.add_argument("--limit", type=int, help="максимум запросов на нишу (для теста)")
+    p_run = sub.add_parser("run", help="run the query matrix through the APIs")
+    p_run.add_argument("--engines", help="comma-separated: gemini,perplexity,openai")
+    p_run.add_argument("--niches", help="comma-separated: tech,medical,…")
+    p_run.add_argument("--limit", type=int, help="max queries per niche (for testing)")
     p_run.add_argument("--sleep", type=float, default=2.0,
-                       help="пауза между запросами, сек (default: 2)")
+                       help="pause between calls, sec (default: 2)")
     p_run.add_argument("--resume", action="store_true",
-                       help="пропускать запросы, по которым за сегодня уже есть ok-строка движка")
+                       help="skip pairs that already have an ok answer in any prior run "
+                            "(fills an unfinished matrix without re-spending quota on duplicates)")
     p_run.set_defaults(fn=cmd_run)
 
-    p_rep = sub.add_parser("report", help="сводка + HTML-дашборд")
-    p_rep.add_argument("--out", help="путь для dashboard.html")
+    p_rep = sub.add_parser("report", help="summary + HTML dashboard")
+    p_rep.add_argument("--out", help="path for dashboard.html")
     p_rep.set_defaults(fn=cmd_report)
 
-    p_me = sub.add_parser("manual-export", help="чеклист CSV для ручного прогона")
-    p_me.add_argument("--engine", help="имя движка в отчёте: chatgpt, yandex…")
-    p_me.add_argument("--limit", type=int, help="максимум запросов на нишу")
+    p_me = sub.add_parser("manual-export", help="CSV checklist for a manual run")
+    p_me.add_argument("--engine", help="engine name in the report: chatgpt, yandex…")
+    p_me.add_argument("--limit", type=int, help="max queries per niche")
     p_me.set_defaults(fn=cmd_manual_export)
 
-    p_mi = sub.add_parser("manual-import", help="влить заполненный чеклист")
-    p_mi.add_argument("file", help="путь к заполненному чеклисту")
+    p_mi = sub.add_parser("manual-import", help="merge a filled checklist")
+    p_mi.add_argument("file", help="path to the filled checklist")
     p_mi.set_defaults(fn=cmd_manual_import)
 
     args = parser.parse_args()

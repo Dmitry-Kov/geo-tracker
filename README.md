@@ -104,7 +104,7 @@ python geo_tracker.py run [--engines LIST] [--niches LIST] [--limit N] [--sleep 
 | `--niches` | comma-separated subset of niche keys from `queries.py` |
 | `--limit N` | max queries per niche — cheap smoke tests |
 | `--sleep SEC` | pause between API calls, default 2 |
-| `--resume` | skip (engine, niche, query) triples that already have an ok row **today** |
+| `--resume` | skip (engine, niche, query) triples that already have an ok row in **any** prior run — fills an unfinished matrix without re-spending quota on duplicates |
 
 Errors don't abort the run: the row is recorded with an `error:` status and
 the run continues. On a daily-quota 429 (`RESOURCE_EXHAUSTED` with a
