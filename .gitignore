@@ -1,9 +1,12 @@
 # секреты и локальная конфигурация
 .env
 queries.py
+queries_*.py
 
 # данные замеров и отчёты (содержат клиентские домены)
-results.csv
+results*.csv
+answers.jsonl
+*.log
 dashboard*.html
 manual_*.csv
 geo_report_*.docx
