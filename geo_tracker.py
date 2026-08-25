@@ -31,6 +31,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -38,11 +39,20 @@ from urllib.parse import urlparse
 import requests
 
 from queries import DOMAINS, NICHES
+
+try:
+    # Optional {domain: [brand name, ...]} map — engines often name a brand in
+    # the answer text without ever linking its domain. Lives in queries.py
+    # (local config) so client brand names stay out of the repo.
+    from queries import BRAND_ALIASES
+except ImportError:
+    BRAND_ALIASES = {}
 from report_html import build_dashboard
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
 DASHBOARD_HTML = BASE_DIR / "dashboard.html"
+ANSWERS_JSONL = BASE_DIR / "answers.jsonl"
 
 TIMEOUT = 90
 RETRIES = 4
@@ -93,9 +103,36 @@ def match_domains(answer_text: str, source_urls: list, source_titles: list) -> d
     titles_blob = " ".join(source_titles)
     for d in DOMAINS:
         src = any(domain_in_url(d, u) for u in source_urls) or domain_in_text(d, titles_blob)
-        txt = domain_in_text(d, answer_text)
+        txt = domain_in_text(d, answer_text) or any(
+            alias.lower() in answer_text.lower()
+            for alias in BRAND_ALIASES.get(d, []))
         hits[d] = {"src": int(src), "txt": int(txt)}
     return hits
+
+
+def normalize_host(value: str) -> str:
+    """Bare hostname from a URL or an already-bare domain string (Gemini's web.title)."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    try:
+        netloc = urlparse(v if "://" in v else "https://" + v).netloc.lower()
+    except ValueError:
+        return ""
+    netloc = netloc.split(":")[0]
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def extract_source_domains(engine: str, urls: list, titles: list) -> list:
+    """All source hostnames in an answer, tracked or not (for all_source_domains)."""
+    values = titles if engine == "gemini" else urls
+    seen, out = set(), []
+    for v in values:
+        host = normalize_host(v)
+        if host and host not in seen:
+            seen.add(host)
+            out.append(host)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +265,7 @@ def ask_openai(query: str) -> dict:
         "model": model,
         "input": query,
         "tools": [{"type": "web_search"}],
+        "tool_choice": "required",
     }
     data = _post_with_retries(
         "https://api.openai.com/v1/responses",
@@ -267,11 +305,12 @@ def available_engines() -> list:
 # ---------------------------------------------------------------------------
 
 def csv_fieldnames() -> list:
-    fields = ["run_date", "run_ts", "engine", "niche", "query",
+    fields = ["row_id", "run_date", "run_ts", "engine", "niche", "query",
               "status", "answer_chars", "n_sources"]
     for d in DOMAINS:
         fields.append(f"src_{d}")
         fields.append(f"txt_{d}")
+    fields.append("all_source_domains")
     return fields
 
 
@@ -293,10 +332,22 @@ def load_results() -> list:
         return [row for row in csv.DictReader(f)]
 
 
+def save_answer(row_id: str, answer: dict) -> None:
+    """Persist the full raw answer (text + urls + titles) keyed by row_id.
+
+    results.csv only keeps derived signals; the raw answer used to be
+    discarded entirely, which meant re-querying (burning quota, getting a
+    different non-deterministic answer) was the only way to read it later.
+    """
+    with ANSWERS_JSONL.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"row_id": row_id, **answer}, ensure_ascii=False) + "\n")
+
+
 def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
              answer: dict = None) -> dict:
     now = datetime.now(timezone.utc)
     row = {
+        "row_id": uuid.uuid4().hex[:12],
         "run_date": now.strftime("%Y-%m-%d"),
         "run_ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "engine": engine,
@@ -305,6 +356,7 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         "status": status,
         "answer_chars": 0,
         "n_sources": 0,
+        "all_source_domains": "",
     }
     for d in DOMAINS:
         row[f"src_{d}"] = 0
@@ -316,6 +368,9 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         for d, h in hits.items():
             row[f"src_{d}"] = h["src"]
             row[f"txt_{d}"] = h["txt"]
+        row["all_source_domains"] = ";".join(
+            extract_source_domains(engine, answer["urls"], answer["titles"]))
+        save_answer(row["row_id"], answer)
     return row
 
 
@@ -409,14 +464,29 @@ def cmd_run(args) -> None:
 # report command
 # ---------------------------------------------------------------------------
 
-def share_of_voice(rows: list, *, run_date: str = None, engine: str = None) -> dict:
+def is_grounded(row: dict) -> bool:
+    """True if the engine actually ran a web search for this answer (has sources).
+
+    Some engines (OpenAI's Responses API without a forced tool_choice) may
+    skip the search tool and answer from parametric knowledge — a different
+    channel that shouldn't be mixed into the same share-of-voice numbers.
+    """
+    try:
+        return int(row.get("n_sources") or 0) > 0
+    except ValueError:
+        return False
+
+
+def share_of_voice(rows: list, *, run_date: str = None, engine: str = None,
+                    grounded: bool = None) -> dict:
     """{niche: {domain: % of the niche's queries with a hit (src or txt)}}"""
     sov = {}
     for niche in NICHES:
         subset = [r for r in rows
                   if r["niche"] == niche and r["status"] == "ok"
                   and (run_date is None or r["run_date"] == run_date)
-                  and (engine is None or r["engine"] == engine)]
+                  and (engine is None or r["engine"] == engine)
+                  and (grounded is None or is_grounded(r) == grounded)]
         if not subset:
             continue
         sov[niche] = {}
@@ -438,32 +508,58 @@ def cmd_report(args) -> None:
     ok_rows = [r for r in rows if r["status"] == "ok"]
     err_rows = [r for r in rows if r["status"] != "ok"]
 
+    latest_ok = [r for r in ok_rows if r["run_date"] == latest]
+    grounded_n = sum(1 for r in latest_ok if is_grounded(r))
+    ungrounded_n = len(latest_ok) - grounded_n
     print(f"History: {len(dates)} dates ({dates[0]} … {latest}), "
-          f"{len(ok_rows)} answers, {len(err_rows)} errors, engines: {', '.join(engines)}\n")
+          f"{len(ok_rows)} answers, {len(err_rows)} errors, engines: {', '.join(engines)}")
+    print(f"Latest run {latest}: {grounded_n} grounded (had sources), "
+          f"{ungrounded_n} ungrounded (answered without a web search) — reported separately below.\n")
 
-    print(f"=== Share of voice, latest run {latest} (src or txt, any engine) ===")
-    sov = share_of_voice(rows, run_date=latest)
-    header = "niche".ljust(14) + "".join(d.split(".")[0][:12].rjust(13) for d in DOMAINS)
-    print(header)
-    for niche, by_domain in sov.items():
-        primary = NICHES[niche]["primary_domain"]
-        cells = ""
-        for d in DOMAINS:
-            val = f"{by_domain[d]:.0f}%"
-            if d == primary:
-                val = "*" + val
-            cells += val.rjust(13)
-        print(niche.ljust(14) + cells)
-    print("(* — niche's primary domain)\n")
+    def print_sov_table(title: str, grounded_filter: bool) -> None:
+        print(f"=== Share of voice, latest run {latest}, {title} (src or txt, any engine) ===")
+        sov = share_of_voice(rows, run_date=latest, grounded=grounded_filter)
+        if not sov:
+            print("  (no rows in this channel)\n")
+            return
+        header = "niche".ljust(14) + "".join(d.split(".")[0][:12].rjust(13) for d in DOMAINS)
+        print(header)
+        for niche, by_domain in sov.items():
+            primary = NICHES[niche]["primary_domain"]
+            cells = ""
+            for d in DOMAINS:
+                val = f"{by_domain[d]:.0f}%"
+                if d == primary:
+                    val = "*" + val
+                cells += val.rjust(13)
+            print(niche.ljust(14) + cells)
+        print("(* — niche's primary domain)\n")
 
-    print("=== Domain leaderboard (latest run, % of all queries) ===")
-    subset = [r for r in ok_rows if r["run_date"] == latest]
+    print_sov_table("GROUNDED", True)
+    print_sov_table("UNGROUNDED — answered from parametric knowledge, no web search", False)
+
+    print("=== Domain leaderboard (latest run, GROUNDED only, % of grounded queries) ===")
+    subset = [r for r in latest_ok if is_grounded(r)]
     leaderboard = []
     for d in DOMAINS:
         hits = sum(1 for r in subset if r.get(f"src_{d}") == "1" or r.get(f"txt_{d}") == "1")
         leaderboard.append((d, round(100 * hits / len(subset), 1) if subset else 0.0))
     for d, pct in sorted(leaderboard, key=lambda x: -x[1]):
         print(f"  {d:<22} {pct:5.1f}%")
+
+    print(f"\n=== All source domains (raw, incl. untracked), latest run {latest}, GROUNDED, by niche ===")
+    for niche in NICHES:
+        freq = {}
+        for r in subset:
+            if r["niche"] != niche:
+                continue
+            for host in (r.get("all_source_domains") or "").split(";"):
+                if host:
+                    freq[host] = freq.get(host, 0) + 1
+        if not freq:
+            continue
+        top = ", ".join(f"{d} ({c})" for d, c in sorted(freq.items(), key=lambda x: -x[1]))
+        print(f"  {niche}: {top}")
 
     out = Path(args.out) if args.out else DASHBOARD_HTML
     build_dashboard(rows, DOMAINS, NICHES, out)

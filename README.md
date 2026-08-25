@@ -20,8 +20,24 @@ detection to fight.
   **mentioned in the answer text** (`txt`)
 - Exact-host and word-boundary matching — `pc.uz` matches `www.pc.uz` but
   not `1pc.uz`
+- Optional brand aliases: counts a domain as mentioned when the engine names
+  the brand in prose without linking it (`txt` only, never `src`)
 - Cross-citation tracking: every answer is checked against **all** tracked
   domains, not just the niche's primary one
+- Grounded vs ungrounded split: answers that came with no sources at all
+  (the engine skipped its search tool and replied from parametric memory)
+  are reported as a separate channel instead of diluting share of voice
+- Every source domain is recorded, tracked or not (`all_source_domains`), so
+  you can see who the engines cite *instead* of you
+- Raw answers archived to `answers.jsonl`, keyed to their CSV row — re-read
+  what an engine actually said without burning quota on a re-query that
+  would return something different anyway
+- Known limitation, kept on purpose so historical runs stay comparable:
+  under Gemini, `src` is matched against `web.title` (its citation URIs are
+  opaque Google redirects), and title matching does not resolve subdomains —
+  so hosts like `uz.wikipedia.org` are not counted toward `wikipedia.org`.
+  Gemini undercounts subdomain-heavy domains; Perplexity and OpenAI match
+  real URLs and are unaffected
 - Append-only CSV history — interrupted runs lose nothing, every run is a
   new data point on the trend
 - Quota-aware: parses Google's 429 `QuotaFailure` details, stops the engine

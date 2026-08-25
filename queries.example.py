@@ -48,3 +48,11 @@ NICHES = {
         ],
     },
 }
+
+
+# Optional: brand names an engine may use in the answer text instead of
+# linking the domain. Counted for txt matching only, never for src.
+# Omit this entirely if you do not need it.
+BRAND_ALIASES = {
+    "stackoverflow.com": ["stack overflow"],
+}
