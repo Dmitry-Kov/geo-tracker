@@ -146,6 +146,21 @@ def make_table(doc, n_rows, n_cols):
     return table
 
 
+CONTENT_CM = 21 - 2 * 2  # A4 width minus the 2 cm side margins set in build_docx
+
+
+def set_widths(table, widths_cm):
+    """Fixed column widths on the grid and every cell. With the default equal
+    widths a wide domain matrix squeezes niche titles into letter-by-letter
+    wraps, and LibreOffice / Google Docs don't autofit the way Word does."""
+    table.autofit = False
+    for col, w in zip(table.columns, widths_cm):
+        col.width = Cm(w)
+    for row in table.rows:
+        for cell, w in zip(row.cells, widths_cm):
+            cell.width = Cm(w)
+
+
 def fill_cell(cell, text, *, font=F_BODY, size=9, bold=False, color=INK,
               fill=None, center=True):
     cell.text = ""
@@ -314,6 +329,7 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
             pct_cell(m.rows[r_i].cells[c_i], by_dom[d],
                      primary=d == cfg["primary_domain"])
         r_i += 1
+    set_widths(m, [3.4] + [(CONTENT_CM - 3.4) / len(DOMAINS)] * len(DOMAINS))
 
     # Tracked pages (page-level), only when queries.py defines ARTICLES
     if ARTICLES:
@@ -335,6 +351,7 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
             fill_cell(at.rows[i].cells[3],
                       "\n".join(f"{r['engine']}: {r['query']}" for r in cited) or T["art_none"],
                       size=8.5, color=INK if cited else MUTED, center=False)
+        set_widths(at, [5.6, 1.6, 2.6, CONTENT_CM - 9.8])
 
     # Overall leaderboard
     heading(doc, T["h_leaderboard"])
@@ -363,6 +380,7 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
         fill_cell(et.rows[i].cells[1], str(sub_n), font=F_MONO, size=9, color=MUTED)
         for c_i, d in enumerate(DOMAINS, start=2):
             pct_cell(et.rows[i].cells[c_i], by_dom[d])
+    set_widths(et, [2.3, 0.9] + [(CONTENT_CM - 3.2) / len(DOMAINS)] * len(DOMAINS))
 
     # Auto-derived findings from the data
     heading(doc, T["h_observations"])
