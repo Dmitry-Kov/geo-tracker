@@ -53,7 +53,7 @@ def _sov_rows(rows: list, domains: list, niches: dict) -> dict:
     return out
 
 
-def _prepare(rows: list, domains: list, niches: dict) -> dict:
+def _prepare(rows: list, domains: list, niches: dict, articles: dict = None) -> dict:
     ok = [r for r in rows if r["status"] == "ok"]
     errors = [r for r in rows if r["status"] != "ok"]
     dates = sorted({r["run_date"] for r in rows})
@@ -103,6 +103,16 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
         if len(current_hits) >= 12:
             break
 
+    # Tracked pages (page-level): which answers in the current snapshot cited each one
+    article_rows = []
+    for key, cfg in (articles or {}).items():
+        cited = sorted((r for r in current if r.get(f"art_{key}") == "1"), key=_ts, reverse=True)
+        article_rows.append({
+            "title": cfg["title"], "url": cfg["url"],
+            "by_engine": {e: sum(1 for r in cited if r["engine"] == e) for e in engines},
+            "queries": [{"engine": r["engine"], "query": r["query"]} for r in cited],
+        })
+
     return {
         "generated": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "dates": dates,
@@ -121,6 +131,7 @@ def _prepare(rows: list, domains: list, niches: dict) -> dict:
         "by_engine": by_engine,
         "leaderboard": leaderboard,
         "current_hits": current_hits,
+        "articles": article_rows,
     }
 
 
@@ -160,6 +171,9 @@ table.matrix{width:100%;border-collapse:collapse;background:var(--card);border:1
 .matrix th{font:600 12px 'Inter';color:var(--muted);text-transform:none}
 .matrix th.dom{font-family:var(--mono);font-size:11px}
 .matrix td.niche{text-align:left;font-weight:600;padding-left:14px;white-space:nowrap}
+.matrix td.art{text-align:left;font-weight:600;padding-left:14px}
+.matrix td.art .eng{display:block;font-weight:400;word-break:break-all}
+.matrix td.qs{text-align:left;font-size:12px}
 .cell{font-family:var(--mono);font-weight:700;border-radius:6px;padding:6px 0;display:block;min-width:54px}
 .cell.primary{outline:2px solid var(--ink);outline-offset:-2px}
 .legend{font-size:12px;color:var(--muted);margin-top:8px}
@@ -189,6 +203,12 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <div class="sub">Share of the niche's queries where the domain appeared in the answer's sources or text. Current snapshot: the freshest answer per pair (engine × niche × query), regardless of run date.</div>
 <table class="matrix" id="matrix"></table>
 <div class="legend"><span class="pr"></span>niche's primary domain · fill intensity — visibility level</div>
+
+<section id="articlesSec" hidden>
+<h2>Article citations</h2>
+<div class="sub">Tracked pages found among the answer's sources: how many answers cited each page, by engine. Current snapshot, like the matrix above.</div>
+<table class="matrix" id="articles"></table>
+</section>
 
 <h2>Share of voice over time</h2>
 <div class="sub" id="trendSub">Overall visibility of each domain by run date (all niches and engines).</div>
@@ -248,6 +268,20 @@ for (const [niche, info] of Object.entries(D.niches)) {
 }
 document.getElementById('matrix').innerHTML = html;
 
+/* Tracked articles */
+if (D.articles.length) {
+  document.getElementById('articlesSec').hidden = false;
+  document.getElementById('articles').innerHTML = '<tr><th></th>' +
+    D.engines.map(e => `<th class="dom">${e}</th>`).join('') + '<th>queries that cited it</th></tr>' +
+    D.articles.map(a => `<tr><td class="art">${a.title}<span class="eng">${a.url}</span></td>` +
+      D.engines.map(e => {
+        const n = a.by_engine[e] || 0;
+        return `<td><span class="cell" style="background:${n ? 'var(--accent-soft)' : 'transparent'}">${n}</span></td>`;
+      }).join('') +
+      `<td class="qs">${a.queries.map(q => `<span class="eng">${q.engine}</span> “${q.query}”`).join('<br>') || '—'}</td></tr>`
+    ).join('');
+}
+
 /* Trend */
 new Chart(document.getElementById('trendChart'), {
   type: 'line',
@@ -300,7 +334,8 @@ document.getElementById('foot').textContent =
 """
 
 
-def build_dashboard(rows: list, domains: list, niches: dict, out_path: Path) -> None:
-    data = _prepare(rows, domains, niches)
+def build_dashboard(rows: list, domains: list, niches: dict, out_path: Path,
+                    articles: dict = None) -> None:
+    data = _prepare(rows, domains, niches, articles)
     html = TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     Path(out_path).write_text(html, encoding="utf-8")

@@ -32,14 +32,20 @@ detection to fight.
 - Raw answers archived to `answers.jsonl`, keyed to their CSV row — re-read
   what an engine actually said without burning quota on a re-query that
   would return something different anyway
+- Optional article tracking (`ARTICLES`): checks whether specific pages —
+  placed articles, landing pages — are among an answer's sources, not just
+  their domain. A big portal being cited doesn't mean your page was
 - Known limitation, kept on purpose so historical runs stay comparable:
   under Gemini, `src` is matched against `web.title` (its citation URIs are
   opaque Google redirects), and title matching does not resolve subdomains —
   so hosts like `uz.wikipedia.org` are not counted toward `wikipedia.org`.
   Gemini undercounts subdomain-heavy domains; Perplexity and OpenAI match
-  real URLs and are unaffected
+  real URLs and are unaffected. The article check is not limited this way:
+  with `ARTICLES` set, Gemini's redirects are resolved during the run
 - Append-only CSV history — interrupted runs lose nothing, every run is a
-  new data point on the trend
+  new data point on the trend. `run` and `manual-import` refuse to append to
+  a `results.csv` whose columns no longer match `DOMAINS`/`ARTICLES`, instead
+  of silently shifting values under the wrong headers
 - Quota-aware: parses Google's 429 `QuotaFailure` details, stops the engine
   on daily-quota exhaustion instead of burning retries, `--resume` finishes
   the run later without duplicates
@@ -81,7 +87,9 @@ URLs, source titles:
 - **Gemini** — `generateContent` with the `google_search` tool. Source URIs
   in `groundingChunks` are Google redirect links that hide the real host, so
   domains are matched against `web.title` (which usually carries the source
-  host) and the answer text.
+  host) and the answer text. The redirects expire within weeks, so when
+  `ARTICLES` is set they are resolved right after each answer and stored as
+  `resolved_urls` in `answers.jsonl`; only the article check uses them.
 - **Perplexity** — `chat/completions` with the `sonar` model; sources come
   from `citations` and `search_results`.
 - **OpenAI** — Responses API with the `web_search` tool; sources come from
@@ -96,6 +104,12 @@ URLs, source titles:
 
 URL matching is exact-host (subdomains count, lookalikes don't); text
 matching uses word boundaries.
+
+For every page in `ARTICLES`, `art_<key>` is 1 when that page is among the
+answer's sources. Pages are compared by host and path, ignoring the scheme,
+`www.`, query strings (engines append `?utm_source=…`), fragments and the
+trailing slash. Keys become column names, so, as with `DOMAINS`, editing
+the list means starting a new `results.csv`.
 
 **Share of voice** — the percentage of a niche's queries where at least one
 of the two signals fired. The dashboard shows the per-niche visibility
@@ -147,7 +161,9 @@ python geo_tracker.py manual-import manual_chatgpt_DATE.csv
 ```
 
 Imported rows join the shared history and show up in all reports alongside
-API engines.
+API engines. With `ARTICLES` set, the checklist gets an `articles_in_sources`
+column: list the article keys, or just paste the URLs you saw among the
+sources.
 
 ### DOCX export
 
@@ -156,7 +172,8 @@ python report_docx.py [--out PATH]   # requires python-docx
 ```
 
 Builds a formatted DOCX report from the latest run: KPI row, visibility
-matrix, engine comparison, auto-derived findings.
+matrix, article citations (when `ARTICLES` is set), engine comparison,
+auto-derived findings.
 
 ### Scheduled runs
 
