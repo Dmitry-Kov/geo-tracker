@@ -56,3 +56,16 @@ NICHES = {
 BRAND_ALIASES = {
     "stackoverflow.com": ["stack overflow"],
 }
+
+
+# Optional: specific pages to track at URL level (placed articles, landing
+# pages). A domain hit only says the site was cited; this says whether it was
+# this page. One art_<key> column per entry, so keys become column names —
+# editing this list later needs a new results.csv, like editing DOMAINS.
+# Omit this entirely if you do not need it.
+ARTICLES = {
+    "wiki_quantum": {
+        "title": "Wikipedia: Quantum computing",
+        "url": "https://en.wikipedia.org/wiki/Quantum_computing",
+    },
+}

@@ -34,7 +34,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -47,6 +47,13 @@ try:
     from queries import BRAND_ALIASES
 except ImportError:
     BRAND_ALIASES = {}
+try:
+    # Optional {key: {"title": ..., "url": ...}} — specific pages (placed
+    # articles, landing pages) checked at URL level on top of the domain
+    # signals: a big portal being cited doesn't mean *our* page was.
+    from queries import ARTICLES
+except ImportError:
+    ARTICLES = {}
 from report_html import build_dashboard
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -133,6 +140,55 @@ def extract_source_domains(engine: str, urls: list, titles: list) -> list:
             seen.add(host)
             out.append(host)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Article (page-level) matching
+# ---------------------------------------------------------------------------
+
+def normalize_page(url: str) -> str:
+    """host + path, ignoring scheme, www, query (?utm_source=…), fragment and trailing slash."""
+    host = normalize_host(url)
+    if not host:
+        return ""
+    path = urlparse(url if "://" in url else "https://" + url).path
+    return host + unquote(path).rstrip("/").lower()
+
+
+def match_articles(source_urls: list) -> dict:
+    """For each tracked article: 1 if its page is among the answer's sources."""
+    pages = {normalize_page(u) for u in source_urls}
+    return {key: int(normalize_page(cfg["url"]) in pages) for key, cfg in ARTICLES.items()}
+
+
+def article_key(value: str) -> str:
+    """Article key from either the key itself or any URL form of its page ("" if unknown)."""
+    if value in ARTICLES:
+        return value
+    page = normalize_page(value)
+    return next((key for key, cfg in ARTICLES.items()
+                 if page and normalize_page(cfg["url"]) == page), "")
+
+
+def resolve_redirect(url: str) -> str:
+    """Target of a redirect link, one hop, without fetching the page ("" if not a redirect)."""
+    try:
+        with requests.get(url, allow_redirects=False, timeout=15, stream=True) as resp:
+            return resp.headers.get("Location", "") if resp.is_redirect else ""
+    except requests.RequestException:
+        return ""
+
+
+def resolve_gemini_sources(answer: dict) -> int:
+    """Add resolved_urls (the real source pages) to a Gemini answer; returns how many failed.
+
+    Gemini's groundingChunks uris are Google redirects that expire (404 within
+    weeks), so they can only be resolved during the run. The resolved URLs feed
+    the article check only: domain src under Gemini stays on web.title so
+    historical runs remain comparable.
+    """
+    answer["resolved_urls"] = [resolve_redirect(u) for u in answer["urls"]]
+    return answer["resolved_urls"].count("")
 
 
 # ---------------------------------------------------------------------------
@@ -310,14 +366,39 @@ def csv_fieldnames() -> list:
     for d in DOMAINS:
         fields.append(f"src_{d}")
         fields.append(f"txt_{d}")
+    for key in ARTICLES:
+        fields.append(f"art_{key}")
     fields.append("all_source_domains")
     return fields
+
+
+def check_results_schema() -> None:
+    """Stop before appending to a results.csv written under a different config.
+
+    Columns come from DOMAINS and ARTICLES, and rows are appended by position:
+    after an edit to either list, new rows would land under the wrong headers
+    and silently corrupt the history.
+    """
+    if not RESULTS_CSV.exists() or RESULTS_CSV.stat().st_size == 0:
+        return
+    with RESULTS_CSV.open(newline="", encoding="utf-8-sig") as f:
+        header = next(csv.reader(f), [])
+    fields = csv_fieldnames()
+    if header == fields:
+        return
+    missing = [c for c in fields if c not in header]
+    extra = [c for c in header if c not in fields]
+    details = (f"missing: {', '.join(missing) or '-'}; extra: {', '.join(extra) or '-'}"
+               if missing or extra else "same columns in a different order")
+    sys.exit(f"{RESULTS_CSV.name} columns don't match DOMAINS/ARTICLES in queries.py ({details}).\n"
+             f"Appending would shift values under the wrong headers. Start a new history "
+             f"(rename {RESULTS_CSV.name}) or migrate it to the current columns first.")
 
 
 def append_row(row: dict) -> None:
     """Append rows one by one — a crash mid-run loses nothing."""
     fields = csv_fieldnames()
-    is_new = not RESULTS_CSV.exists()
+    is_new = not RESULTS_CSV.exists() or RESULTS_CSV.stat().st_size == 0
     with RESULTS_CSV.open("a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if is_new:
@@ -361,6 +442,8 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
     for d in DOMAINS:
         row[f"src_{d}"] = 0
         row[f"txt_{d}"] = 0
+    for key in ARTICLES:
+        row[f"art_{key}"] = 0
     if answer:
         row["answer_chars"] = len(answer["text"])
         row["n_sources"] = len(answer["urls"])
@@ -368,6 +451,9 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         for d, h in hits.items():
             row[f"src_{d}"] = h["src"]
             row[f"txt_{d}"] = h["txt"]
+        pages = answer["urls"] + [u for u in answer.get("resolved_urls", []) if u]
+        for key, hit in match_articles(pages).items():
+            row[f"art_{key}"] = hit
         row["all_source_domains"] = ";".join(
             extract_source_domains(engine, answer["urls"], answer["titles"]))
         save_answer(row["row_id"], answer)
@@ -402,6 +488,7 @@ def cmd_run(args) -> None:
             sys.exit(f"Unknown niches: {', '.join(unknown)}. Available: {', '.join(NICHES)}")
         niches = requested
 
+    check_results_schema()
     done_already = set()
     if args.resume:
         done_already = {(r["engine"], r["niche"], r["query"]) for r in load_results()
@@ -430,12 +517,20 @@ def cmd_run(args) -> None:
                 label = f"[{done}/{total}] {engine:<10} {niche:<12} {query[:50]}"
                 try:
                     answer = ENGINES[engine]["fn"](query)
+                    unresolved = (resolve_gemini_sources(answer)
+                                  if ARTICLES and engine == "gemini" else 0)
                     row = make_row(engine, niche, query, answer=answer)
                     hit_domains = [d for d in DOMAINS
                                    if row[f"src_{d}"] or row[f"txt_{d}"]]
+                    hit_articles = [k for k in ARTICLES if row[f"art_{k}"]]
                     hits_total += len(hit_domains)
                     marker = " ✓ " + ", ".join(hit_domains) if hit_domains else ""
+                    if hit_articles:
+                        marker += " | articles: " + ", ".join(hit_articles)
                     print(label + marker)
+                    if unresolved:
+                        print(f"    ! {unresolved} of {len(answer['urls'])} Gemini source links "
+                              f"did not resolve — the article check may miss them")
                 except QuotaExhausted as e:
                     dead.add(engine)
                     row = make_row(engine, niche, query, status=f"error: {e}")
@@ -561,8 +656,19 @@ def cmd_report(args) -> None:
         top = ", ".join(f"{d} ({c})" for d, c in sorted(freq.items(), key=lambda x: -x[1]))
         print(f"  {niche}: {top}")
 
+    if ARTICLES:
+        print(f"\n=== Article citations, latest run {latest} (page among the answer's sources) ===")
+        for key, cfg in ARTICLES.items():
+            cited = [r for r in latest_ok if r.get(f"art_{key}") == "1"]
+            engines_hit = sorted({r["engine"] for r in cited})
+            print(f"  {key} — {cfg['title']}\n    {cfg['url']}")
+            print(f"    cited in {len(cited)} of {len(latest_ok)} answers"
+                  + (f" ({', '.join(engines_hit)})" if cited else ""))
+            for r in cited:
+                print(f"      {r['engine']:<10} {r['niche']:<14} {r['query']}")
+
     out = Path(args.out) if args.out else DASHBOARD_HTML
-    build_dashboard(rows, DOMAINS, NICHES, out)
+    build_dashboard(rows, DOMAINS, NICHES, out, articles=ARTICLES)
     print(f"\nDashboard: {out}")
 
 
@@ -575,8 +681,9 @@ MANUAL_FIELDS = ["engine", "niche", "query", "domains_in_sources", "domains_in_t
 def cmd_manual_export(args) -> None:
     engine = args.engine or "manual"
     out = BASE_DIR / f"manual_{engine}_{datetime.now().strftime('%Y-%m-%d')}.csv"
+    fields = MANUAL_FIELDS + (["articles_in_sources"] if ARTICLES else [])
     with out.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=MANUAL_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for niche, cfg in NICHES.items():
             queries = cfg["queries"][:args.limit] if args.limit else cfg["queries"]
@@ -586,6 +693,9 @@ def cmd_manual_export(args) -> None:
     print(f"Checklist: {out.name}")
     print("Run the queries by hand, fill in domains comma-separated (e.g. pc.uz, sprav.uz),\n"
           "then: python geo_tracker.py manual-import " + out.name)
+    if ARTICLES:
+        print("articles_in_sources: article keys or the URLs you saw among the sources "
+              f"({', '.join(ARTICLES)})")
 
 
 def cmd_manual_import(args) -> None:
@@ -595,6 +705,7 @@ def cmd_manual_import(args) -> None:
     if not path.exists():
         sys.exit(f"File not found: {args.file}")
 
+    check_results_schema()
     imported = 0
     with path.open(newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
@@ -604,6 +715,10 @@ def cmd_manual_import(args) -> None:
                     d = d.removeprefix("www.")
                     if d in DOMAINS:
                         row[prefix + d] = 1
+            for value in re.split(r"[,;\s]+", (r.get("articles_in_sources") or "").strip()):
+                key = article_key(value)
+                if key:
+                    row[f"art_{key}"] = 1
             append_row(row)
             imported += 1
     print(f"Imported rows: {imported} → {RESULTS_CSV.name}")

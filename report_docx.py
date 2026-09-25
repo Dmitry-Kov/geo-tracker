@@ -26,6 +26,11 @@ from docx.shared import Cm, Pt, RGBColor
 
 from queries import DOMAINS, NICHES
 
+try:
+    from queries import ARTICLES  # optional page-level tracking, see geo_tracker.py
+except ImportError:
+    ARTICLES = {}
+
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
 
@@ -189,6 +194,11 @@ STRINGS = {
         "visibility_note": "Share of the niche's queries where the domain appeared in the "
                            "answer's sources (src) or text (txt). ★ — niche's primary domain.",
         "col_niche": "niche",
+        "h_articles": "Article citations",
+        "articles_note": "Tracked pages found among the answer's sources: how many answers "
+                         "in the current snapshot cited each page, and for which queries.",
+        "art_cols": ["article", "answers", "engines", "queries"],
+        "art_none": "not cited",
         "h_leaderboard": "Domain leaderboard",
         "lb_cols": ["domain", "SOV", "note"],
         "lb_niches": "niches: {names}",
@@ -218,6 +228,11 @@ STRINGS = {
         "visibility_note": "Доля запросов ниши, где домен попал в источники (src) или текст "
                            "ответа (txt). ★ — целевой домен ниши.",
         "col_niche": "ниша",
+        "h_articles": "Цитирование статей",
+        "articles_note": "Отслеживаемые страницы среди источников ответа: сколько ответов "
+                         "текущего среза сослались на каждую и по каким запросам.",
+        "art_cols": ["статья", "ответов", "движки", "запросы"],
+        "art_none": "не цитируется",
         "h_leaderboard": "Общий зачёт по доменам",
         "lb_cols": ["домен", "SOV", "комментарий"],
         "lb_niches": "ниши: {names}",
@@ -299,6 +314,27 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
             pct_cell(m.rows[r_i].cells[c_i], by_dom[d],
                      primary=d == cfg["primary_domain"])
         r_i += 1
+
+    # Tracked pages (page-level), only when queries.py defines ARTICLES
+    if ARTICLES:
+        heading(doc, T["h_articles"])
+        para(doc, T["articles_note"], size=9, color=MUTED)
+        at = make_table(doc, len(ARTICLES) + 1, 4)
+        header_row(at, T["art_cols"])
+        for i, (key, cfg) in enumerate(ARTICLES.items(), start=1):
+            cited = [r for r in current if r.get(f"art_{key}") == "1"]
+            cell = at.rows[i].cells[0]
+            fill_cell(cell, cfg["title"], size=8.5, bold=True, center=False)
+            style_run(cell.paragraphs[0].add_run("\n" + cfg["url"]),
+                      font=F_MONO, size=7, color=MUTED)
+            fill_cell(at.rows[i].cells[1], str(len(cited)), font=F_MONO, size=9,
+                      bold=bool(cited), color=ACCENT if cited else MUTED,
+                      fill=ACCENT_SOFT if cited else None)
+            fill_cell(at.rows[i].cells[2], ", ".join(sorted({r["engine"] for r in cited})) or "—",
+                      font=F_MONO, size=8.5, center=False)
+            fill_cell(at.rows[i].cells[3],
+                      "\n".join(f"{r['engine']}: {r['query']}" for r in cited) or T["art_none"],
+                      size=8.5, color=INK if cited else MUTED, center=False)
 
     # Overall leaderboard
     heading(doc, T["h_leaderboard"])
