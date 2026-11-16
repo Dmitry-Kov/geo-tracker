@@ -19,6 +19,7 @@ Commands:
 Examples:
   python geo_tracker.py run
   python geo_tracker.py run --engines gemini --niches tech,medical --limit 3
+  python geo_tracker.py run --samples 3 --geo UZ   # repeated samples + provenance
   python geo_tracker.py report
   python geo_tracker.py manual-export --engine chatgpt
   python geo_tracker.py manual-import manual_chatgpt_2026-06-11.csv
@@ -55,6 +56,8 @@ try:
 except ImportError:
     ARTICLES = {}
 from report_html import build_dashboard
+from sov_stats import (sov_stats, format_ci, DEFAULT_B, DEFAULT_SEED,
+                       MIN_BOOTSTRAP_QUERIES)
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
@@ -256,12 +259,14 @@ def _post_with_retries(url: str, *, headers: dict, payload: dict) -> dict:
     raise RuntimeError(f"request failed after {RETRIES} attempts: {last_err}")
 
 
-def ask_gemini(query: str) -> dict:
+def ask_gemini(query: str, geo: str = "") -> dict:
     """Gemini + Google Search grounding. Sources come from groundingChunks.
 
     Note: groundingChunks uris are Google redirect links that hide the real
     host, so domains are matched against web.title (usually the source host)
-    and the answer text.
+    and the answer text. This adapter sends no locality to Gemini (not
+    implemented: google_search has no country-level field), so a requested
+    geo is recorded but NOT applied.
     """
     model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -287,16 +292,23 @@ def ask_gemini(query: str) -> dict:
             urls.append(web["uri"])
         if web.get("title"):
             titles.append(web["title"])
-    return {"text": text, "urls": urls, "titles": titles}
+    return {"text": text, "urls": urls, "titles": titles,
+            "model": data.get("modelVersion") or model, "model_requested": model}
 
 
-def ask_perplexity(query: str) -> dict:
-    """Perplexity Sonar. Sources: citations + search_results."""
+def ask_perplexity(query: str, geo: str = "") -> dict:
+    """Perplexity Sonar. Sources: citations + search_results.
+
+    A requested geo IS applied here: Sonar takes
+    web_search_options.user_location.country (ISO alpha-2, country-level).
+    """
     model = os.environ.get("PERPLEXITY_MODEL", "sonar")
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": query}],
     }
+    if geo:
+        payload["web_search_options"] = {"user_location": {"country": geo}}
     data = _post_with_retries(
         "https://api.perplexity.ai/chat/completions",
         headers={"Authorization": f"Bearer {os.environ['PERPLEXITY_API_KEY']}",
@@ -311,16 +323,24 @@ def ask_perplexity(query: str) -> dict:
             urls.append(sr["url"])
         if sr.get("title"):
             titles.append(sr["title"])
-    return {"text": text, "urls": urls, "titles": titles}
+    return {"text": text, "urls": urls, "titles": titles,
+            "model": data.get("model") or model, "model_requested": model}
 
 
-def ask_openai(query: str) -> dict:
-    """OpenAI Responses API + web_search. Sources: url_citation annotations."""
+def ask_openai(query: str, geo: str = "") -> dict:
+    """OpenAI Responses API + web_search. Sources: url_citation annotations.
+
+    A requested geo IS applied here: web_search takes user_location
+    (approximate, country-level).
+    """
     model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    tool = {"type": "web_search"}
+    if geo:
+        tool["user_location"] = {"type": "approximate", "country": geo}
     payload = {
         "model": model,
         "input": query,
-        "tools": [{"type": "web_search"}],
+        "tools": [tool],
         "tool_choice": "required",
     }
     data = _post_with_retries(
@@ -342,7 +362,8 @@ def ask_openai(query: str) -> dict:
                             urls.append(ann["url"])
                         if ann.get("title"):
                             titles.append(ann["title"])
-    return {"text": " ".join(text_parts), "urls": urls, "titles": titles}
+    return {"text": " ".join(text_parts), "urls": urls, "titles": titles,
+            "model": data.get("model") or model, "model_requested": model}
 
 
 ENGINES = {
@@ -350,6 +371,12 @@ ENGINES = {
     "perplexity": {"env": "PERPLEXITY_API_KEY", "fn": ask_perplexity},
     "openai": {"env": "OPENAI_API_KEY", "fn": ask_openai},
 }
+
+# Which adapters actually send a requested geo to the engine. OpenAI and
+# Perplexity take a country-level user_location; the Gemini adapter sends no
+# locality (not implemented), so for Gemini the geo is recorded as requested,
+# not applied — a limitation of this tracker, stated rather than assumed away.
+GEO_SUPPORTED = {"gemini": False, "perplexity": True, "openai": True}
 
 
 def available_engines() -> list:
@@ -362,6 +389,7 @@ def available_engines() -> list:
 
 def csv_fieldnames() -> list:
     fields = ["row_id", "run_date", "run_ts", "engine", "niche", "query",
+              "model", "geo", "geo_applied", "sample",
               "status", "answer_chars", "n_sources"]
     for d in DOMAINS:
         fields.append(f"src_{d}")
@@ -373,11 +401,12 @@ def csv_fieldnames() -> list:
 
 
 def check_results_schema() -> None:
-    """Stop before appending to a results.csv written under a different config.
+    """Stop before appending to a results.csv written under a different schema.
 
-    Columns come from DOMAINS and ARTICLES, and rows are appended by position:
-    after an edit to either list, new rows would land under the wrong headers
-    and silently corrupt the history.
+    Columns come from the provenance set plus DOMAINS and ARTICLES, and rows
+    are appended by position: after a schema change (e.g. the model/geo/sample
+    provenance columns) or an edit to either list, new rows would land under
+    the wrong headers and silently corrupt the history.
     """
     if not RESULTS_CSV.exists() or RESULTS_CSV.stat().st_size == 0:
         return
@@ -390,9 +419,10 @@ def check_results_schema() -> None:
     extra = [c for c in header if c not in fields]
     details = (f"missing: {', '.join(missing) or '-'}; extra: {', '.join(extra) or '-'}"
                if missing or extra else "same columns in a different order")
-    sys.exit(f"{RESULTS_CSV.name} columns don't match DOMAINS/ARTICLES in queries.py ({details}).\n"
+    sys.exit(f"{RESULTS_CSV.name} columns don't match the current schema ({details}).\n"
              f"Appending would shift values under the wrong headers. Start a new history "
-             f"(rename {RESULTS_CSV.name}) or migrate it to the current columns first.")
+             f"(rename {RESULTS_CSV.name}) or migrate it to the current columns first "
+             f"(see README: provenance columns).")
 
 
 def append_row(row: dict) -> None:
@@ -425,7 +455,8 @@ def save_answer(row_id: str, answer: dict) -> None:
 
 
 def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
-             answer: dict = None) -> dict:
+             answer: dict = None, geo: str = "", geo_applied: int = 0,
+             sample: int = 1) -> dict:
     now = datetime.now(timezone.utc)
     row = {
         "row_id": uuid.uuid4().hex[:12],
@@ -434,6 +465,10 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         "engine": engine,
         "niche": niche,
         "query": query,
+        "model": (answer or {}).get("model", ""),
+        "geo": geo,
+        "geo_applied": geo_applied,
+        "sample": sample,
         "status": status,
         "answer_chars": 0,
         "n_sources": 0,
@@ -456,7 +491,8 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
             row[f"art_{key}"] = hit
         row["all_source_domains"] = ";".join(
             extract_source_domains(engine, answer["urls"], answer["titles"]))
-        save_answer(row["row_id"], answer)
+        save_answer(row["row_id"], {**answer, "geo": geo,
+                                    "geo_applied": geo_applied, "sample": sample})
     return row
 
 
@@ -488,20 +524,40 @@ def cmd_run(args) -> None:
             sys.exit(f"Unknown niches: {', '.join(unknown)}. Available: {', '.join(NICHES)}")
         niches = requested
 
+    geo = (args.geo or "").strip().upper()
+    if geo and not re.fullmatch(r"[A-Z]{2}", geo):
+        sys.exit(f"--geo expects an ISO 3166-1 alpha-2 country code (e.g. UZ, US, DE), "
+                 f"got: {args.geo!r}")
+    samples = args.samples
+    if samples < 1:
+        sys.exit("--samples must be >= 1")
+
     check_results_schema()
-    done_already = set()
+    # (engine, niche, query) -> ok answers already in history for THIS geo:
+    # an answer fetched without a locality is not a sample of the UZ matrix.
+    ok_counts = {}
     if args.resume:
-        done_already = {(r["engine"], r["niche"], r["query"]) for r in load_results()
-                        if r["status"] == "ok"}
-        if done_already:
-            print(f"--resume: {len(done_already)} ok answers already in history, "
-                  f"skipping them — filling the unfinished pairs")
+        for r in load_results():
+            if r["status"] == "ok" and (r.get("geo") or "") == geo:
+                key = (r["engine"], r["niche"], r["query"])
+                ok_counts[key] = ok_counts.get(key, 0) + 1
+        if ok_counts:
+            print(f"--resume: {sum(ok_counts.values())} ok answers already in history "
+                  f"across {len(ok_counts)} pairs (geo: {geo or 'none'}) — topping each "
+                  f"pair up to {samples} sample(s)")
 
     total = 0
     for n in niches:
         qs = NICHES[n]["queries"][:args.limit] if args.limit else NICHES[n]["queries"]
-        total += sum(1 for q in qs for e in engines if (e, n, q) not in done_already)
-    print(f"Engines: {', '.join(engines)} | Niches: {', '.join(niches)} | API calls: {total}\n")
+        total += sum(max(0, samples - ok_counts.get((e, n, q), 0))
+                     for q in qs for e in engines)
+    settings = f"Engines: {', '.join(engines)} | Niches: {', '.join(niches)}"
+    if samples > 1:
+        settings += f" | Samples per cell: {samples}"
+    if geo:
+        applied = [e for e in engines if GEO_SUPPORTED[e]]
+        settings += f" | Geo: {geo} (applied by: {', '.join(applied) or 'none — recorded only'})"
+    print(settings + f" | API calls: {total}\n")
 
     done, hits_total = 0, 0
     dead = set()  # engines dropped from the run due to exhausted quota
@@ -511,39 +567,47 @@ def cmd_run(args) -> None:
             queries = queries[:args.limit]
         for query in queries:
             for engine in engines:
-                if engine in dead or (engine, niche, query) in done_already:
+                have = ok_counts.get((engine, niche, query), 0)
+                if engine in dead or have >= samples:
                     continue
-                done += 1
-                label = f"[{done}/{total}] {engine:<10} {niche:<12} {query[:50]}"
-                try:
-                    answer = ENGINES[engine]["fn"](query)
-                    unresolved = (resolve_gemini_sources(answer)
-                                  if ARTICLES and engine == "gemini" else 0)
-                    row = make_row(engine, niche, query, answer=answer)
-                    hit_domains = [d for d in DOMAINS
-                                   if row[f"src_{d}"] or row[f"txt_{d}"]]
-                    hit_articles = [k for k in ARTICLES if row[f"art_{k}"]]
-                    hits_total += len(hit_domains)
-                    marker = " ✓ " + ", ".join(hit_domains) if hit_domains else ""
-                    if hit_articles:
-                        marker += " | articles: " + ", ".join(hit_articles)
-                    print(label + marker)
-                    if unresolved:
-                        print(f"    ! {unresolved} of {len(answer['urls'])} Gemini source links "
-                              f"did not resolve — the article check may miss them")
-                except QuotaExhausted as e:
-                    dead.add(engine)
-                    row = make_row(engine, niche, query, status=f"error: {e}")
-                    print(f"{label} ✗ {e}")
-                    print(f"    !! {engine}: quota exhausted, engine dropped from the run. "
-                          f"Finish after the quota resets: python geo_tracker.py run --resume")
+                geo_applied = int(bool(geo) and GEO_SUPPORTED[engine])
+                for sample in range(have + 1, samples + 1):
+                    done += 1
+                    label = f"[{done}/{total}] {engine:<10} {niche:<12} {query[:50]}"
+                    if samples > 1:
+                        label += f" s{sample}/{samples}"
+                    try:
+                        answer = ENGINES[engine]["fn"](query, geo)
+                        unresolved = (resolve_gemini_sources(answer)
+                                      if ARTICLES and engine == "gemini" else 0)
+                        row = make_row(engine, niche, query, answer=answer,
+                                       geo=geo, geo_applied=geo_applied, sample=sample)
+                        hit_domains = [d for d in DOMAINS
+                                       if row[f"src_{d}"] or row[f"txt_{d}"]]
+                        hit_articles = [k for k in ARTICLES if row[f"art_{k}"]]
+                        hits_total += len(hit_domains)
+                        marker = " ✓ " + ", ".join(hit_domains) if hit_domains else ""
+                        if hit_articles:
+                            marker += " | articles: " + ", ".join(hit_articles)
+                        print(label + marker)
+                        if unresolved:
+                            print(f"    ! {unresolved} of {len(answer['urls'])} Gemini source links "
+                                  f"did not resolve — the article check may miss them")
+                    except QuotaExhausted as e:
+                        dead.add(engine)
+                        row = make_row(engine, niche, query, status=f"error: {e}",
+                                       geo=geo, geo_applied=geo_applied, sample=sample)
+                        print(f"{label} ✗ {e}")
+                        print(f"    !! {engine}: quota exhausted, engine dropped from the run. "
+                              f"Finish after the quota resets: python geo_tracker.py run --resume")
+                        append_row(row)
+                        break
+                    except Exception as e:  # noqa: BLE001 — record the error and move on
+                        row = make_row(engine, niche, query, status=f"error: {e}",
+                                       geo=geo, geo_applied=geo_applied, sample=sample)
+                        print(f"{label} ✗ {e}")
                     append_row(row)
-                    continue
-                except Exception as e:  # noqa: BLE001 — record the error and move on
-                    row = make_row(engine, niche, query, status=f"error: {e}")
-                    print(f"{label} ✗ {e}")
-                append_row(row)
-                time.sleep(args.sleep)
+                    time.sleep(args.sleep)
             if dead >= set(engines):
                 break
         if dead >= set(engines):
@@ -632,6 +696,48 @@ def cmd_report(args) -> None:
 
     print_sov_table("GROUNDED", True)
     print_sov_table("UNGROUNDED — answered from parametric knowledge, no web search", False)
+
+    def print_audit_table(title: str, grounded_filter: bool) -> None:
+        print(f"=== Measurement uncertainty, latest run {latest}, {title} (95% CI) ===")
+        stats = sov_stats(rows, DOMAINS, NICHES, run_date=latest, grounded=grounded_filter)
+        if not any(stats.values()):
+            print("  (no rows in this channel)\n")
+            return
+        header = "niche".ljust(14) + "".join(d.split(".")[0][:12].rjust(38) for d in DOMAINS)
+        print(header)
+        for niche, by_domain in stats.items():
+            if not by_domain:
+                continue
+            cells = "".join((format_ci(by_domain[d]) if d in by_domain else "—").rjust(38)
+                            for d in DOMAINS)
+            print(niche.ljust(14) + cells)
+        print()
+
+    print_audit_table("GROUNDED", True)
+    print_audit_table("UNGROUNDED — parametric knowledge", False)
+    print("Method: share = hit samples / all samples of the channel. The 95% CI counts "
+          "evidence per query, not per answer: repeated answers to one query are "
+          "correlated.")
+    print(f"Fewer than {MIN_BOOTSTRAP_QUERIES} queries behind a cell, or a share of exactly "
+          f"0% / 100%: Wilson score interval with n = nq (each query is one observation — "
+          f"the conservative reading).")
+    print(f"{MIN_BOOTSTRAP_QUERIES}+ queries: cluster bootstrap over queries, whole queries "
+          f"resampled with all their samples (B={DEFAULT_B}, seed={DEFAULT_SEED}). "
+          f"Reproducible from the same rows.")
+    print("More queries narrow the interval; more samples per query only steady the "
+          "point share.\n")
+
+    models = sorted({r.get("model") or "" for r in latest_ok} - {""})
+    geos = sorted({r.get("geo") or "" for r in latest_ok} - {""})
+    if models:
+        print(f"Provenance (latest run): models — {', '.join(models)}")
+    if geos:
+        applied = sorted({r["engine"] for r in latest_ok if r.get("geo_applied") == "1"})
+        note = (f"applied by {', '.join(applied)}" if applied
+                else "recorded only — not sent to any engine in this run")
+        print(f"Provenance (latest run): requested geo — {', '.join(geos)} ({note})")
+    if models or geos:
+        print()
 
     print("=== Domain leaderboard (latest run, GROUNDED only, % of grounded queries) ===")
     subset = [r for r in latest_ok if is_grounded(r)]
@@ -738,9 +844,19 @@ def main() -> None:
     p_run.add_argument("--limit", type=int, help="max queries per niche (for testing)")
     p_run.add_argument("--sleep", type=float, default=2.0,
                        help="pause between calls, sec (default: 2)")
+    p_run.add_argument("--samples", type=int, default=1, metavar="N",
+                       help="answers per cell (engine × niche × query), default 1. "
+                            "Repeated samples steady the point share (the CI narrows "
+                            "with more queries, not more samples); each sample is a "
+                            "separate row + receipt and spends quota")
+    p_run.add_argument("--geo", metavar="CC",
+                       help="requested country (ISO alpha-2, e.g. UZ). Applied by OpenAI "
+                            "and Perplexity (user_location); for Gemini it is only "
+                            "recorded — this tracker sends Gemini no locality")
     p_run.add_argument("--resume", action="store_true",
-                       help="skip pairs that already have an ok answer in any prior run "
-                            "(fills an unfinished matrix without re-spending quota on duplicates)")
+                       help="count ok answers per pair (same --geo) across all prior "
+                            "runs and only fetch what is missing up to --samples (fills "
+                            "an unfinished matrix without re-spending quota on duplicates)")
     p_run.set_defaults(fn=cmd_run)
 
     p_rep = sub.add_parser("report", help="summary + HTML dashboard")
