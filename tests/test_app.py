@@ -477,3 +477,72 @@ def test_cli_without_queries_py_explains_what_to_do(tmp_path):
                        text=True, cwd=tmp_path)
     assert p.returncode != 0
     assert "queries.example.py" in p.stderr and "Traceback" not in p.stderr
+
+
+# ---------------------------------------------------------------------------
+# Multiple niches per brand
+# ---------------------------------------------------------------------------
+
+MULTI_FORM = {**BRAND_FORM,
+              "niche_key": ["crm", "hosting"],
+              "niche_title": ["CRM", "Hosting"],
+              "primary_domain": ["brand.io", "other.org"],
+              "queries": ["best crm\ncheap crm", "best hosting"]}
+
+
+def test_multi_niche_brand_run_and_reports(client):
+    r = client.post("/brands", data=MULTI_FORM, follow_redirects=False)
+    assert r.status_code == 303, r.text
+    brand_id = int(r.headers["location"].rsplit("/", 1)[-1])
+    client.post(f"/brands/{brand_id}/run")
+    page = client.get("/runs/1").text
+    assert "CRM" in page and "Hosting" in page
+    Session = client.app.state.Session
+    with Session() as s:
+        answers = s.query(Answer).all()
+        assert {a.niche for a in answers} == {"crm", "hosting"}
+        assert len(answers) == 9  # 3 queries × 3 engines
+        b = s.get(Brand, brand_id)
+        assert set(b.niches) == {"crm", "hosting"}
+        assert b.niches["hosting"]["primary_domain"] == "other.org"
+    docx = pytest.importorskip("docx")
+    r = client.get("/runs/1/report.docx?lang=en")
+    doc = docx.Document(io.BytesIO(r.content))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    tables = "\n".join(c.text for t in doc.tables for row in t.rows for c in row.cells)
+    assert "CRM" in text + tables and "Hosting" in text + tables
+
+
+def test_niche_row_partial(client):
+    r = client.get("/brands/niche-row")
+    assert r.status_code == 200
+    assert 'name="niche_key"' in r.text and 'name="queries"' in r.text
+
+
+def test_multi_niche_validation(client):
+    dup = {**MULTI_FORM, "niche_key": ["crm", "crm"]}
+    r = client.post("/brands", data=dup)
+    assert r.status_code == 400 and "duplicate" in r.text
+    empty = {**MULTI_FORM, "queries": ["best crm", ""]}
+    r = client.post("/brands", data=empty)
+    assert r.status_code == 400 and "query" in r.text
+    bad_primary = {**MULTI_FORM, "primary_domain": ["brand.io", "nope.io"]}
+    r = client.post("/brands", data=bad_primary)
+    assert r.status_code == 400 and "primary" in r.text
+
+
+def test_edit_brand_round_trips_multiple_niches(client):
+    r = client.post("/brands", data=MULTI_FORM, follow_redirects=False)
+    brand_id = int(r.headers["location"].rsplit("/", 1)[-1])
+    page = client.get(f"/brands/{brand_id}").text
+    assert page.count('name="niche_key"') == 2
+    assert 'value="crm"' in page and 'value="hosting"' in page
+    three = {**MULTI_FORM, "niche_key": ["crm", "hosting", "vpn"],
+             "niche_title": ["CRM", "Hosting", "VPN"],
+             "primary_domain": ["brand.io", "other.org", "brand.io"],
+             "queries": ["best crm", "best hosting", "best vpn"]}
+    r = client.post(f"/brands/{brand_id}", data=three, follow_redirects=False)
+    assert r.status_code == 303
+    Session = client.app.state.Session
+    with Session() as s:
+        assert set(s.get(Brand, brand_id).niches) == {"crm", "hosting", "vpn"}

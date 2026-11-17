@@ -1,0 +1,13 @@
+<fieldset class="niche-row">
+  <legend>Niche
+    <button type="button" class="link" onclick="this.closest('.niche-row').remove()">remove</button>
+  </legend>
+  <div class="grid2">
+    <label>Key <input name="niche_key" value="{{ n.key }}" placeholder="main"></label>
+    <label>Title <input name="niche_title" value="{{ n.title }}" placeholder="CRM"></label>
+    <label>Primary domain (optional)
+      <input name="primary_domain" value="{{ n.primary_domain }}" placeholder="example.com"></label>
+    <label>Queries — one per line
+      <textarea name="queries" rows="3" placeholder="best crm for small business">{{ n.queries }}</textarea></label>
+  </div>
+</fieldset>

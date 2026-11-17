@@ -25,12 +25,16 @@
     <label>Geo (ISO alpha-2, optional) <input name="geo" value="{{ values.geo }}" placeholder="UZ"></label>
     <label>Domains — one per line
       <textarea name="domains" rows="4" required placeholder="example.com">{{ values.domains }}</textarea></label>
-    <label>Queries — one per line
-      <textarea name="queries" rows="4" required placeholder="best crm for small business">{{ values.queries }}</textarea></label>
-    <label>Niche key <input name="niche_key" value="{{ values.niche_key }}" placeholder="main"></label>
-    <label>Niche title <input name="niche_title" value="{{ values.niche_title }}" placeholder="CRM"></label>
-    <label>Primary domain (optional) <input name="primary_domain" value="{{ values.primary_domain }}" placeholder="example.com"></label>
     <label>Samples per cell <input name="samples" type="number" min="1" value="{{ values.samples }}"></label>
+  </div>
+
+  <div id="niche-rows">
+    {% for n in values.niches %}{% include "_niche_row.html" %}{% endfor %}
+  </div>
+  <p><button type="button" class="btn" hx-get="/brands/niche-row"
+             hx-target="#niche-rows" hx-swap="beforeend">+ Add niche</button></p>
+
+  <div class="grid2">
     <label>Schedule — cron in UTC, empty = manual only
       <input name="schedule" value="{{ values.schedule }}" placeholder="0 9 * * 1"></label>
     <fieldset class="engines">

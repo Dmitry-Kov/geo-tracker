@@ -83,14 +83,11 @@ def _hit(row, domain):
 
 
 def parse_brand_form(form) -> tuple:
-    """(config dict, error string) from the brand form. Slice 1: one niche
-    per brand via simple fields; articles/aliases are optional JSON."""
+    """(config dict, error string) from the brand form. Niches arrive as
+    aligned repeated fields (niche_key / niche_title / primary_domain /
+    queries — one set per niche row); articles/aliases are optional JSON."""
     name = form.get("name", "").strip()
     domains = [d.strip().lower() for d in form.get("domains", "").splitlines() if d.strip()]
-    niche_key = re.sub(r"\W+", "_", form.get("niche_key", "").strip()) or "main"
-    niche_title = form.get("niche_title", "").strip() or name
-    primary = form.get("primary_domain", "").strip().lower()
-    queries = [q.strip() for q in form.get("queries", "").splitlines() if q.strip()]
     geo = form.get("geo", "").strip().upper()
     engines = [e for e in form.getlist("engines") if e in gt.ENGINES]
     schedule = form.get("schedule", "").strip()
@@ -112,10 +109,29 @@ def parse_brand_form(form) -> tuple:
         return {}, "name is required"
     if not domains:
         return {}, "at least one domain is required"
-    if not queries:
-        return {}, "at least one query is required"
-    if primary and primary not in domains:
-        return {}, "primary domain must be one of the domains"
+
+    keys = form.getlist("niche_key")
+    titles = form.getlist("niche_title")
+    primaries = form.getlist("primary_domain")
+    query_blocks = form.getlist("queries")
+    niches = {}
+    for i, raw_key in enumerate(keys):
+        key = re.sub(r"\W+", "_", raw_key.strip()) or f"niche_{i + 1}"
+        block = query_blocks[i] if i < len(query_blocks) else ""
+        queries = [q.strip() for q in block.splitlines() if q.strip()]
+        title = (titles[i].strip() if i < len(titles) else "") or name
+        primary = primaries[i].strip().lower() if i < len(primaries) else ""
+        if not queries:
+            return {}, f"niche '{key}': at least one query is required"
+        if key in niches:
+            return {}, f"duplicate niche key: '{key}'"
+        if primary and primary not in domains:
+            return {}, f"niche '{key}': primary domain must be one of the domains"
+        niches[key] = {"title": title, "primary_domain": primary or domains[0],
+                       "queries": queries}
+    if not niches:
+        return {}, "at least one niche is required"
+
     if geo and not re.fullmatch(r"[A-Z]{2}", geo):
         return {}, "geo must be an ISO alpha-2 country code (e.g. UZ)"
     if not engines:
@@ -129,9 +145,7 @@ def parse_brand_form(form) -> tuple:
             return {}, f"invalid cron schedule: {e}"
     cfg = {
         "name": name, "domains": domains, "aliases": aliases,
-        "niches": {niche_key: {"title": niche_title,
-                               "primary_domain": primary or domains[0],
-                               "queries": queries}},
+        "niches": niches,
         "articles": articles, "geo": geo, "engines": engines,
         "models": models, "samples": samples, "schedule": schedule,
     }
@@ -139,26 +153,35 @@ def parse_brand_form(form) -> tuple:
 
 
 def form_values(brand=None, form=None) -> dict:
-    """Template-ready form values from a Brand or a submitted form."""
+    """Template-ready form values from a Brand or a submitted form.
+    values.niches is a list of row dicts, one per niche."""
     if form is not None:
         v = {k: form.get(k, "") for k in
-             ("name", "niche_key", "niche_title", "primary_domain", "geo",
-              "samples", "schedule", "articles", "aliases")}
+             ("name", "geo", "samples", "schedule", "articles", "aliases")}
         v["domains"] = form.get("domains", "")
-        v["queries"] = form.get("queries", "")
         v["engines"] = form.getlist("engines")
+        keys = form.getlist("niche_key")
+        titles = form.getlist("niche_title")
+        primaries = form.getlist("primary_domain")
+        blocks = form.getlist("queries")
+        v["niches"] = [
+            {"key": keys[i] if i < len(keys) else "",
+             "title": titles[i] if i < len(titles) else "",
+             "primary_domain": primaries[i] if i < len(primaries) else "",
+             "queries": blocks[i] if i < len(blocks) else ""}
+            for i in range(max(len(keys), len(blocks), 1))]
         for e in gt.ENGINES:
             v[f"model_{e}"] = form.get(f"model_{e}", "")
         return v
-    niche_key = next(iter(brand.niches), "main") if brand else "main"
-    niche = (brand.niches.get(niche_key) if brand else None) or {}
+    niches = [{"key": k, "title": cfg.get("title", ""),
+               "primary_domain": cfg.get("primary_domain", ""),
+               "queries": "\n".join(cfg.get("queries", []))}
+              for k, cfg in (brand.niches.items() if brand else [])]
     return {
         "name": brand.name if brand else "",
         "domains": "\n".join(brand.domains) if brand else "",
-        "niche_key": niche_key,
-        "niche_title": niche.get("title", ""),
-        "primary_domain": niche.get("primary_domain", ""),
-        "queries": "\n".join(niche.get("queries", [])),
+        "niches": niches or [{"key": "main", "title": "",
+                              "primary_domain": "", "queries": ""}],
         "geo": brand.geo if brand else "",
         "engines": brand.engines if brand else list(gt.ENGINES),
         "samples": brand.samples if brand else 1,
@@ -272,6 +295,14 @@ def create_app(db_path=None) -> FastAPI:
             s.commit()
             sync_schedule(b.id, b.schedule)
             return RedirectResponse(f"/brands/{b.id}", status_code=303)
+
+    @app.get("/brands/niche-row", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
+    def niche_row(request: Request):
+        """One empty niche fieldset, appended to the form by HTMX. Declared
+        before /brands/{brand_id} so 'niche-row' is not parsed as an id."""
+        return TEMPLATES.TemplateResponse(
+            request, "_niche_row.html",
+            {"n": {"key": "", "title": "", "primary_domain": "", "queries": ""}})
 
     @app.get("/brands/{brand_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     def brand_edit(request: Request, brand_id: int):
