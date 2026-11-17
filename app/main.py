@@ -30,6 +30,7 @@ from report_docx import build_docx
 from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 from .db import Answer, Brand, Run, make_engine, make_session_factory, migrate_database
+from . import dynamics
 from .login_guard import LoginLimiter
 from .runner import (BIG_RUN_CONFIRM, WAITING, execute_run, incomplete_notice,
                      recover_interrupted, run_estimate, run_rows, start_run)
@@ -198,6 +199,43 @@ def form_values(brand=None, form=None) -> dict:
     }
 
 
+def _run_label(run) -> str:
+    when = run.started_at.strftime("%Y-%m-%d %H:%M") if run.started_at else "—"
+    return f"#{run.id} · {when}"
+
+
+def _brand_history(brand, runs) -> tuple:
+    """Per niche × domain history over DONE runs only, each read through its
+    own snapshot (run_rows). Non-done runs never contribute figures. Returns
+    (history_json for tables+charts, done_list for the compare selectors)."""
+    done = sorted((r for r in runs if r.status == "done"), key=lambda r: r.id)
+    hist: dict = {}
+    for r in done:
+        cfg, rows = run_rows(r)
+        stats = dynamics.share_ci_rows(rows, cfg["domains"], cfg["niches"])
+        day = rows[0]["run_date"] if rows else (
+            r.started_at.strftime("%Y-%m-%d") if r.started_at else f"run {r.id}")
+        for niche, by_dom in stats.items():
+            for d, st in by_dom.items():
+                hist.setdefault(niche, {}).setdefault(d, []).append(
+                    {"run_id": r.id, "label": f"#{r.id} · {day}", **st})
+    history_json = {}
+    for niche, by_dom in hist.items():
+        title = (brand.niches.get(niche) or {}).get("title", niche)
+        history_json[niche] = {"title": title, "domains": {
+            d: {"labels": [p["label"] for p in pts],
+                "point": [p["point"] for p in pts],
+                "lo": [p["lo"] for p in pts],
+                "hi": [p["hi"] for p in pts],
+                "nq": [p["n_queries"] for p in pts],
+                "n": [p["n_samples"] for p in pts],
+                "method": [p["method"] for p in pts],
+                "run_ids": [p["run_id"] for p in pts]}
+            for d, pts in by_dom.items()}}
+    done_list = [{"id": r.id, "label": _run_label(r)} for r in done]
+    return history_json, done_list
+
+
 def create_app(db_path=None) -> FastAPI:
     # .env first. Everything below takes its settings from the environment
     # while the app is being built — the database path, the session key, the
@@ -336,11 +374,42 @@ def create_app(db_path=None) -> FastAPI:
             if b is None:
                 raise HTTPException(404, "brand not found")
             runs = list(b.runs)
-            busy = any(r.status in ("pending", "running") for r in runs)
+            busy = any(r.status in ("pending", "running", WAITING) for r in runs)
+            history_json, done_list = _brand_history(b, runs)
             return render(request, "brand_form.html",
                           {"brand": b, "values": form_values(brand=b), "error": "",
                            "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy,
-                           "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM})
+                           "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM,
+                           "history_json": history_json, "done_list": done_list})
+
+    @app.get("/brands/{brand_id}/compare", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
+    def compare_page(request: Request, brand_id: int, a: int = None, b: int = None):
+        with Session() as s:
+            brand = s.get(Brand, brand_id)
+            if brand is None:
+                raise HTTPException(404, "brand not found")
+            done = sorted((r for r in brand.runs if r.status == "done"),
+                          key=lambda r: r.id)
+            done_list = [{"id": r.id, "label": _run_label(r)} for r in done]
+            ctx = {"brand": brand, "done_list": done_list, "a": a, "b": b,
+                   "result": None, "error": ""}
+            if a is not None and b is not None:
+                ra, rb = s.get(Run, a), s.get(Run, b)
+                if (ra is None or rb is None or ra.brand_id != brand_id
+                        or rb.brand_id != brand_id):
+                    ctx["error"] = "run not found in this brand"
+                elif ra.status != "done" or rb.status != "done":
+                    ctx["error"] = "only done runs can be compared"
+                elif a == b:
+                    ctx["error"] = "pick two different runs"
+                else:
+                    cfg_a, rows_a = run_rows(ra)
+                    cfg_b, rows_b = run_rows(rb)
+                    ctx["result"] = dynamics.compare(
+                        cfg_a, rows_a, cfg_b, rows_b,
+                        status_a=ra.status, status_b=rb.status)
+                    ctx["label_a"], ctx["label_b"] = _run_label(ra), _run_label(rb)
+            return render(request, "comparison.html", ctx)
 
     @app.post("/brands/{brand_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     async def brand_update(request: Request, brand_id: int):
