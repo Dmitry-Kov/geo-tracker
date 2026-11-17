@@ -24,7 +24,12 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from queries import DOMAINS, NICHES
+try:
+    from queries import DOMAINS, NICHES
+except ImportError:
+    # queries.py is local, gitignored config. The CLI needs it (main() says
+    # so); the service passes per-brand config explicitly and runs without it.
+    DOMAINS, NICHES = [], {}
 
 try:
     from queries import ARTICLES  # optional page-level tracking, see geo_tracker.py
@@ -76,14 +81,15 @@ def _latest_per_pair(ok):
     return list(latest.values())
 
 
-def sov(rows, *, niche=None, engine=None):
+def sov(rows, *, niche=None, engine=None, domains=None):
+    domains = DOMAINS if domains is None else domains
     subset = [r for r in rows
               if (niche is None or r["niche"] == niche)
               and (engine is None or r["engine"] == engine)]
     if not subset:
         return None
     return {d: round(100 * sum(_hit(r, d) for r in subset) / len(subset), 1)
-            for d in DOMAINS}
+            for d in domains}
 
 
 # ---------------------------------------------------------------------------
@@ -294,9 +300,20 @@ STRINGS = {
 # Document assembly
 # ---------------------------------------------------------------------------
 
-def build_docx(out_path: Path, lang: str = "en") -> Path:
+def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
+               domains: list = None, niches: dict = None,
+               articles: dict = None) -> Path:
+    """Export the report. rows/domains/niches/articles default to the CLI
+    history (results.csv + queries.py); the service passes per-brand data."""
     T = STRINGS[lang]
-    all_rows, ok = load_ok_rows()
+    domains = DOMAINS if domains is None else domains
+    niches = NICHES if niches is None else niches
+    articles = ARTICLES if articles is None else articles
+    if rows is None:
+        all_rows, ok = load_ok_rows()
+    else:
+        all_rows = rows
+        ok = [r for r in rows if r["status"] == "ok"]
     dates = sorted({r["run_date"] for r in all_rows})
     latest = dates[-1]
     # Current snapshot: freshest answer per pair across all history, so the
@@ -327,7 +344,7 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
     for i, (val, label) in enumerate([
             (str(len(current)), T["kpi_answers"].format(latest=latest)),
             (str(len(engines)), T["kpi_engines"].format(engines=", ".join(engines))),
-            (str(sum(1 for r in current for d in DOMAINS if _hit(r, d))),
+            (str(sum(1 for r in current for d in domains if _hit(r, d))),
              T["kpi_hits"]),
             (f"{len(dates)}", T["kpi_dates"].format(first=dates[0], latest=latest))]):
         fill_cell(kpi.rows[0].cells[i], val, font=F_MONO, size=16, bold=True,
@@ -337,17 +354,17 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
     # Visibility matrix by niche
     heading(doc, T["h_visibility"])
     para(doc, T["visibility_note"], size=9, color=MUTED)
-    short = {d: d.split(".")[0] for d in DOMAINS}
-    m = make_table(doc, len([n for n in NICHES if sov(current, niche=n)]) + 1,
-                   len(DOMAINS) + 1)
-    header_row(m, [T["col_niche"]] + [short[d] for d in DOMAINS])
+    short = {d: d.split(".")[0] for d in domains}
+    m = make_table(doc, len([n for n in niches if sov(current, niche=n, domains=domains)]) + 1,
+                   len(domains) + 1)
+    header_row(m, [T["col_niche"]] + [short[d] for d in domains])
     r_i = 1
-    for niche, cfg in NICHES.items():
-        by_dom = sov(current, niche=niche)
+    for niche, cfg in niches.items():
+        by_dom = sov(current, niche=niche, domains=domains)
         if not by_dom:
             continue
         fill_cell(m.rows[r_i].cells[0], cfg["title"], size=9, bold=True, center=False)
-        for c_i, d in enumerate(DOMAINS, start=1):
+        for c_i, d in enumerate(domains, start=1):
             pct_cell(m.rows[r_i].cells[c_i], by_dom[d],
                      primary=d == cfg["primary_domain"])
         r_i += 1
@@ -355,17 +372,17 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
     # Audit-grade uncertainty: ALL samples of the latest run, grounded channel.
     # The snapshot matrix above keeps its semantics; this section is additive.
     latest_ok = [r for r in ok if r["run_date"] == latest]
-    audit = sov_stats(latest_ok, DOMAINS, NICHES, grounded=True)
+    audit = sov_stats(latest_ok, domains, niches, grounded=True)
     if any(audit.values()):
         heading(doc, T["h_uncertainty"])
         para(doc, T["uncertainty_note"].format(latest=latest), size=9, color=MUTED)
-        niches_with_data = [n for n in NICHES if audit.get(n)]
-        ut = make_table(doc, len(niches_with_data) + 1, len(DOMAINS) + 1)
-        header_row(ut, [T["col_niche"]] + [short[d] for d in DOMAINS])
+        niches_with_data = [n for n in niches if audit.get(n)]
+        ut = make_table(doc, len(niches_with_data) + 1, len(domains) + 1)
+        header_row(ut, [T["col_niche"]] + [short[d] for d in domains])
         for r_i, niche in enumerate(niches_with_data, start=1):
-            fill_cell(ut.rows[r_i].cells[0], NICHES[niche]["title"],
+            fill_cell(ut.rows[r_i].cells[0], niches[niche]["title"],
                       size=9, bold=True, center=False)
-            for c_i, d in enumerate(DOMAINS, start=1):
+            for c_i, d in enumerate(domains, start=1):
                 st = audit[niche].get(d)
                 if st is None:
                     fill_cell(ut.rows[r_i].cells[c_i], "—", size=9, color=MUTED)
@@ -389,13 +406,13 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
             para(doc, T[key].format(geo=", ".join(geos), applied=", ".join(applied)),
                  font=F_MONO, size=8.5, color=MUTED, space_after=3)
 
-    # Tracked pages (page-level), only when queries.py defines ARTICLES
-    if ARTICLES:
+    # Tracked pages (page-level), only when the config defines articles
+    if articles:
         heading(doc, T["h_articles"])
         para(doc, T["articles_note"], size=9, color=MUTED)
-        at = make_table(doc, len(ARTICLES) + 1, 4)
+        at = make_table(doc, len(articles) + 1, 4)
         header_row(at, T["art_cols"])
-        for i, (key, cfg) in enumerate(ARTICLES.items(), start=1):
+        for i, (key, cfg) in enumerate(articles.items(), start=1):
             cited = [r for r in current if r.get(f"art_{key}") == "1"]
             cell = at.rows[i].cells[0]
             fill_cell(cell, cfg["title"], size=8.5, bold=True, center=False)
@@ -412,13 +429,13 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
 
     # Overall leaderboard
     heading(doc, T["h_leaderboard"])
-    total = sov(current) or {}
+    total = sov(current, domains=domains) or {}
     lb = sorted(total.items(), key=lambda x: -x[1])
     t = make_table(doc, len(lb) + 1, 3)
     header_row(t, T["lb_cols"])
     for i, (d, pct) in enumerate(lb, start=1):
         niches_hit = sorted({r["niche"] for r in current if _hit(r, d)})
-        note = (T["lb_niches"].format(names=", ".join(NICHES[n]["title"] for n in niches_hit))
+        note = (T["lb_niches"].format(names=", ".join(niches[n]["title"] for n in niches_hit))
                 if niches_hit else T["lb_not_cited"])
         fill_cell(t.rows[i].cells[0], d, font=F_MONO, size=9, center=False)
         pct_cell(t.rows[i].cells[1], pct)
@@ -427,31 +444,31 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
 
     # Per-engine breakdown
     heading(doc, T["h_engines"])
-    e_rows = [e for e in engines if sov(current, engine=e)]
-    et = make_table(doc, len(e_rows) + 1, len(DOMAINS) + 2)
-    header_row(et, T["ec_cols"] + [short[d] for d in DOMAINS])
+    e_rows = [e for e in engines if sov(current, engine=e, domains=domains)]
+    et = make_table(doc, len(e_rows) + 1, len(domains) + 2)
+    header_row(et, T["ec_cols"] + [short[d] for d in domains])
     for i, e in enumerate(e_rows, start=1):
         sub_n = sum(1 for r in current if r["engine"] == e)
-        by_dom = sov(current, engine=e)
+        by_dom = sov(current, engine=e, domains=domains)
         fill_cell(et.rows[i].cells[0], e, font=F_MONO, size=9, bold=True, center=False)
         fill_cell(et.rows[i].cells[1], str(sub_n), font=F_MONO, size=9, color=MUTED)
-        for c_i, d in enumerate(DOMAINS, start=2):
+        for c_i, d in enumerate(domains, start=2):
             pct_cell(et.rows[i].cells[c_i], by_dom[d])
 
     # Auto-derived findings from the data
     heading(doc, T["h_observations"])
     consensus = []
     single = []
-    for d in DOMAINS:
-        for niche in NICHES:
+    for d in domains:
+        for niche in niches:
             who = {r["engine"] for r in current
                    if r["niche"] == niche and _hit(r, d)}
             if len(who) == len(engines) > 1:
-                consensus.append(T["obs_consensus"].format(d=d, title=NICHES[niche]["title"]))
+                consensus.append(T["obs_consensus"].format(d=d, title=niches[niche]["title"]))
             elif len(who) == 1:
                 single.append(T["obs_single"].format(
-                    d=d, title=NICHES[niche]["title"], who=next(iter(who))))
-    zeros = [d for d in DOMAINS if not any(_hit(r, d) for r in current)]
+                    d=d, title=niches[niche]["title"], who=next(iter(who))))
+    zeros = [d for d in domains if not any(_hit(r, d) for r in current)]
     for line in consensus:
         para(doc, "✓ " + line, size=9.5, space_after=3)
     for line in single:
@@ -462,8 +479,8 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
 
     # Hits from the latest run
     heading(doc, T["h_hits"])
-    hits = [(r, [d for d in DOMAINS if _hit(r, d)])
-            for r in current if any(_hit(r, d) for d in DOMAINS)]
+    hits = [(r, [d for d in domains if _hit(r, d)])
+            for r in current if any(_hit(r, d) for d in domains)]
     if hits:
         ht = make_table(doc, len(hits) + 1, 4)
         header_row(ht, T["hits_cols"])
@@ -492,6 +509,9 @@ def main():
     parser.add_argument("--lang", choices=sorted(STRINGS), default="en",
                         help="report-chrome language (default: en); niche titles come from queries.py")
     args = parser.parse_args()
+    if not DOMAINS or not NICHES:
+        raise SystemExit("queries.py is missing or defines no DOMAINS / NICHES.\n"
+                         "Create it from the template: cp queries.example.py queries.py")
     if not RESULTS_CSV.exists():
         raise SystemExit("results.csv not found — run first: python geo_tracker.py run")
     default = BASE_DIR / f"geo_report_{args.lang}_{datetime.now().strftime('%Y-%m-%d')}.docx"

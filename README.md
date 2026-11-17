@@ -294,7 +294,7 @@ first.
 
 ```bash
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install pytest
+.venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -q
 ```
 
@@ -303,8 +303,60 @@ no network. The `queries` config is faked and all file paths are redirected
 to a temp dir, so your real `results.csv` / `answers.jsonl` are never touched.
 Coverage: interval known-answer/edge cases and reproducibility, provenance
 columns and receipts, the schema guard (old/reordered headers), geo payload
-handling per engine, sampling/quota/resume in `run`, and the console/HTML/DOCX
-reports end-to-end.
+handling per engine, sampling/quota/resume in `run`, the console/HTML/DOCX
+reports end-to-end, and the service (brand CRUD, runs, auth, scheduler,
+exports) on a temp SQLite DB.
+
+## Service (M1 skeleton)
+
+A single-user web service over the same measurement core: many brands,
+scheduled runs, receipts and reports in the browser. The CLI keeps working
+unchanged alongside it (its history stays in `results.csv`; the service has
+its own SQLite history).
+
+```bash
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app
+# open http://127.0.0.1:8000
+```
+
+Run it as **one process** — no `--workers`, and no `--reload` while a run is
+in flight: the scheduler and the run queue live in the process, and a restart
+ends whatever run was active (it is closed as `interrupted` on the next
+start, so it never blocks later runs). `queries.py` is CLI configuration;
+the service does not need it.
+
+- **Brands**: domains, one niche with queries (slice 1), optional articles
+  and aliases (JSON), geo, engines, per-engine model overrides, samples,
+  cron schedule. Domains are data, not columns — editing them needs no
+  migration.
+- **Runs**: one at a time, enforced by the database; live progress;
+  per-answer receipts (raw answer, served vs requested model, usage/cost)
+  drill down in the browser. Each run stores a snapshot of the brand's
+  configuration: results and exports of a finished run never change when the
+  brand is edited later.
+- **Results**: visibility matrix, the same audit-grade 95% CI (Wilson /
+  cluster bootstrap), resource-usage summary; export the branded HTML
+  dashboard or DOCX (en/ru) per run.
+- **Auth**: set `APP_PASSWORD` in `.env` to require login (session cookie);
+  unset = local mode without auth, which answers on `localhost` /
+  `127.0.0.1` only. To serve another host name set `APP_ALLOWED_HOSTS`
+  (comma-separated) and a password. State-changing requests sent by a browser
+  from another site are refused (Origin/Referer must match the Host — behind
+  a reverse proxy, forward the original `Host` header). `APP_SECRET` pins the
+  session key across restarts. `GEO_DB_PATH` moves the SQLite file (default
+  `geo_tracker.db`, gitignored — it contains client domains).
+- **Scheduler**: APScheduler cron per brand, **in UTC** (`0 9 * * 1` =
+  Mondays 09:00 UTC). Scheduled runs queue: brands on the same tick run one
+  after another, and a tick that lands on a manual run waits for it. A tick
+  that still cannot start after 6 hours is recorded on the brand as a skipped
+  run. Schedules are not persisted across downtime — a tick missed while the
+  service was stopped is not replayed.
+
+Slice-1 limits, stated honestly: one niche per brand via the form, one run
+at a time, single user, single process, no limit on login attempts (put it
+behind a proxy that rate-limits if it is exposed). Multi-niche editing, trends across runs, users and
+billing are the next slices.
 
 ## Roadmap
 

@@ -1,0 +1,12 @@
+<div id="progress" class="progress"
+  {% if poll and run.status in ['pending', 'running'] %}
+  hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 2s" hx-swap="outerHTML"
+  {% endif %}>
+  <span class="badge {{ run.status }}">{{ run.status }}</span>
+  <span class="mono">{{ run.done_calls }}/{{ run.total_calls }} calls</span>
+  {% if run.error %}<span class="err">{{ run.error }}</span>{% endif %}
+  {% if poll and run.status in ['done', 'error'] %}
+  <span hx-get="/runs/{{ run.id }}" hx-trigger="load delay:300ms"
+        hx-select="#main" hx-target="#main" hx-swap="outerHTML"></span>
+  {% endif %}
+</div>

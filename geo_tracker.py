@@ -39,7 +39,12 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
-from queries import DOMAINS, NICHES
+try:
+    from queries import DOMAINS, NICHES
+except ImportError:
+    # queries.py is local, gitignored config. The CLI needs it (main() says
+    # so); the service passes per-brand config explicitly and runs without it.
+    DOMAINS, NICHES = [], {}
 
 try:
     # Optional {domain: [brand name, ...]} map — engines often name a brand in
@@ -107,15 +112,22 @@ def domain_in_text(domain: str, text: str) -> bool:
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
-def match_domains(answer_text: str, source_urls: list, source_titles: list) -> dict:
-    """For each domain: src (among sources) and txt (in the answer text)."""
+def match_domains(answer_text: str, source_urls: list, source_titles: list, *,
+                  domains: list = None, aliases: dict = None) -> dict:
+    """For each domain: src (among sources) and txt (in the answer text).
+
+    domains/aliases default to the queries.py config (CLI); the service
+    passes per-brand config explicitly.
+    """
+    domains = DOMAINS if domains is None else domains
+    aliases = BRAND_ALIASES if aliases is None else aliases
     hits = {}
     titles_blob = " ".join(source_titles)
-    for d in DOMAINS:
+    for d in domains:
         src = any(domain_in_url(d, u) for u in source_urls) or domain_in_text(d, titles_blob)
         txt = domain_in_text(d, answer_text) or any(
             alias.lower() in answer_text.lower()
-            for alias in BRAND_ALIASES.get(d, []))
+            for alias in aliases.get(d, []))
         hits[d] = {"src": int(src), "txt": int(txt)}
     return hits
 
@@ -158,10 +170,11 @@ def normalize_page(url: str) -> str:
     return host + unquote(path).rstrip("/").lower()
 
 
-def match_articles(source_urls: list) -> dict:
+def match_articles(source_urls: list, *, articles: dict = None) -> dict:
     """For each tracked article: 1 if its page is among the answer's sources."""
+    articles = ARTICLES if articles is None else articles
     pages = {normalize_page(u) for u in source_urls}
-    return {key: int(normalize_page(cfg["url"]) in pages) for key, cfg in ARTICLES.items()}
+    return {key: int(normalize_page(cfg["url"]) in pages) for key, cfg in articles.items()}
 
 
 def article_key(value: str) -> str:
@@ -464,9 +477,18 @@ def save_answer(row_id: str, answer: dict) -> None:
         f.write(json.dumps({"row_id": row_id, **answer}, ensure_ascii=False) + "\n")
 
 
+def build_receipt(answer: dict, *, geo: str = "", geo_applied: int = 0,
+                  sample: int = 1) -> dict:
+    """The raw answer enriched with run provenance — the archival record."""
+    return {**answer, "geo": geo, "geo_applied": geo_applied, "sample": sample}
+
+
 def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
              answer: dict = None, geo: str = "", geo_applied: int = 0,
-             sample: int = 1) -> dict:
+             sample: int = 1, domains: list = None, articles: dict = None,
+             aliases: dict = None, save_receipt: bool = True) -> dict:
+    domains = DOMAINS if domains is None else domains
+    articles = ARTICLES if articles is None else articles
     now = datetime.now(timezone.utc)
     row = {
         "row_id": uuid.uuid4().hex[:12],
@@ -484,25 +506,27 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         "n_sources": 0,
         "all_source_domains": "",
     }
-    for d in DOMAINS:
+    for d in domains:
         row[f"src_{d}"] = 0
         row[f"txt_{d}"] = 0
-    for key in ARTICLES:
+    for key in articles:
         row[f"art_{key}"] = 0
     if answer:
         row["answer_chars"] = len(answer["text"])
         row["n_sources"] = len(answer["urls"])
-        hits = match_domains(answer["text"], answer["urls"], answer["titles"])
+        hits = match_domains(answer["text"], answer["urls"], answer["titles"],
+                             domains=domains, aliases=aliases)
         for d, h in hits.items():
             row[f"src_{d}"] = h["src"]
             row[f"txt_{d}"] = h["txt"]
         pages = answer["urls"] + [u for u in answer.get("resolved_urls", []) if u]
-        for key, hit in match_articles(pages).items():
+        for key, hit in match_articles(pages, articles=articles).items():
             row[f"art_{key}"] = hit
         row["all_source_domains"] = ";".join(
             extract_source_domains(engine, answer["urls"], answer["titles"]))
-        save_answer(row["row_id"], {**answer, "geo": geo,
-                                    "geo_applied": geo_applied, "sample": sample})
+        if save_receipt:
+            save_answer(row["row_id"], build_receipt(answer, geo=geo,
+                                                     geo_applied=geo_applied, sample=sample))
     return row
 
 
@@ -889,6 +913,13 @@ def cmd_manual_import(args) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def require_config() -> None:
+    """The CLI measures what queries.py lists; without it there is nothing to run."""
+    if not DOMAINS or not NICHES:
+        sys.exit("queries.py is missing or defines no DOMAINS / NICHES.\n"
+                 "Create it from the template: cp queries.example.py queries.py")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GEO tracker — AI answer citation monitoring")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -928,6 +959,7 @@ def main() -> None:
     p_mi.set_defaults(fn=cmd_manual_import)
 
     args = parser.parse_args()
+    require_config()
     args.fn(args)
 
 

@@ -506,3 +506,57 @@ def test_manual_import_with_new_schema(paths):
     assert rows[0]["src_example.com"] == "1"
     assert rows[0]["txt_test.org"] == "1"
     assert rows[0]["sample"] == "1" and rows[0]["model"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-brand config parameters (service path) — defaults stay the CLI globals
+# ---------------------------------------------------------------------------
+
+def test_match_domains_explicit_config():
+    hits = gt.match_domains("Brandio is nice", [], [],
+                            domains=["brand.io"], aliases={"brand.io": ["Brandio"]})
+    assert hits == {"brand.io": {"src": 0, "txt": 1}}  # globals not consulted
+
+
+def test_match_articles_explicit_config():
+    articles = {"a1": {"title": "T", "url": "https://brand.io/page"}}
+    assert gt.match_articles(["https://brand.io/page?utm=x"], articles=articles) == {"a1": 1}
+    assert gt.match_articles(["https://brand.io/page"]) == {}  # global ARTICLES is empty
+
+
+def test_make_row_brand_config_without_receipt(paths):
+    answer = {"text": "brand.io is great", "urls": ["https://brand.io/a"],
+              "titles": ["brand.io"], "model": "m"}
+    row = gt.make_row("gemini", "n1", "q1", answer=answer,
+                      domains=["brand.io"], articles={}, aliases={},
+                      save_receipt=False)
+    assert "src_brand.io" in row and row["src_brand.io"] == 1
+    assert "src_example.com" not in row
+    assert not gt.ANSWERS_JSONL.exists()  # service keeps receipts in its own DB
+
+
+def test_build_receipt_is_pure():
+    before = dict(ANSWER)
+    receipt = gt.build_receipt(ANSWER, geo="UZ", geo_applied=1, sample=2)
+    assert receipt["geo"] == "UZ" and receipt["sample"] == 2
+    assert receipt["model"] == ANSWER["model"]
+    assert ANSWER == before  # input untouched
+
+
+def test_build_docx_explicit_config(paths):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    row = {"row_id": "x1", "run_date": "2026-11-17",
+           "run_ts": "2026-11-17T10:00:00Z", "engine": "gemini", "niche": "n1",
+           "query": "q", "status": "ok", "n_sources": "1", "model": "m",
+           "geo": "", "geo_applied": "0", "sample": "1",
+           "src_brand.io": "1", "txt_brand.io": "0"}
+    out = paths / "brand.docx"
+    report_docx.build_docx(out, rows=[row], domains=["brand.io"],
+                           niches={"n1": {"title": "T", "primary_domain": "brand.io",
+                                          "queries": ["q"]}},
+                           articles={})
+    text = "\n".join(p.text for p in docx.Document(out).paragraphs)
+    tables = "\n".join(c.text for t in docx.Document(out).tables for r in t.rows for c in r.cells)
+    assert "brand.io" in text + tables
+    assert "example.com" not in text + tables  # no leaked global config

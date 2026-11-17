@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }} · {{ brand.name }} · geo-tracker{% endblock %}
+{% block content %}
+<div class="head-row">
+  <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ run {{ run.id }}</span></h1>
+  <div class="row-actions">
+    <a class="btn" href="/runs/{{ run.id }}/report.html">Dashboard HTML</a>
+    <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=en">DOCX en</a>
+    <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=ru">DOCX ru</a>
+  </div>
+</div>
+
+{% set poll = False %}{% include "_progress.html" %}
+<p class="mono small muted">
+  trigger={{ run.trigger }}
+  {% if run.started_at %} · started {{ run.started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC{% endif %}
+  {% if run.finished_at %} · finished {{ run.finished_at.strftime("%H:%M:%S") }} UTC{% endif %}
+  · geo={{ cfg.geo or "—" }} · samples={{ cfg.samples }}
+</p>
+
+{% if matrix %}
+<h2>Visibility — this run, all ok answers</h2>
+<div class="card">
+<table class="matrix">
+  <tr><th></th>{% for d in cfg.domains %}<th class="mono">{{ d }}</th>{% endfor %}</tr>
+  {% for niche, by_dom in matrix.items() %}
+  <tr>
+    <td><strong>{{ cfg.niches[niche].title }}</strong></td>
+    {% for d in cfg.domains %}
+    <td class="mono {{ 'hit' if by_dom[d] > 0 }}">{{ by_dom[d] }}%</td>
+    {% endfor %}
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<h2>Measurement uncertainty — grounded, 95% CI</h2>
+<div class="card">
+<table class="matrix">
+  <tr><th></th>{% for d in cfg.domains %}<th class="mono">{{ d }}</th>{% endfor %}</tr>
+  {% for niche, by_dom in audit.items() %}{% if by_dom %}
+  <tr>
+    <td><strong>{{ cfg.niches[niche].title }}</strong></td>
+    {% for d in cfg.domains %}
+    <td>
+      {% if by_dom.get(d) %}{% set st = by_dom[d] %}
+      <span class="mono {{ 'hit' if st.point > 0 }}">{{ st.point }}%</span>
+      <span class="ci mono">[{{ st.lo }}–{{ st.hi }}] {{ st.method }}</span>
+      <span class="ci mono">nq={{ st.n_queries }} · n={{ st.n_samples }}</span>
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+    {% endfor %}
+  </tr>
+  {% endif %}{% endfor %}
+</table>
+<p class="small muted">Unit of evidence is the query. Wilson (n=nq) when nq&lt;{{ N }} or share is 0/100%;
+seeded cluster bootstrap (B={{ B }}, seed={{ seed }}) otherwise. Lower bound on resources below:
+successful answers only.</p>
+</div>
+{% endif %}
+
+{% if usage %}
+<h2>Resource usage — from receipts</h2>
+<div class="card">
+<table>
+  <tr><th>Engine</th><th>Calls</th><th>With usage</th><th>Tokens</th><th>Searches</th><th>Cost (API-reported)</th></tr>
+  {% for e, a in usage.items() %}
+  <tr>
+    <td class="mono">{{ e }}</td>
+    <td class="mono">{{ a.calls }}</td>
+    <td class="mono">{{ a.with_usage }}/{{ a.calls }}</td>
+    <td class="mono">{{ a.tokens if a.with_usage else "—" }}</td>
+    <td class="mono">{{ a.searches if a.searches_known else "—" }}</td>
+    <td class="mono">{{ "$%.4f" | format(a.cost) if a.cost_known else "—" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+
+<h2>Answers ({{ answers | length }})</h2>
+<div class="card">
+<table>
+  <tr><th>Engine</th><th>Query</th><th>Sample</th><th>Model</th><th>Status</th><th>Sources</th><th></th></tr>
+  {% for a in answers %}
+  <tr>
+    <td class="mono">{{ a.engine }}</td>
+    <td>{{ a.query }}</td>
+    <td class="mono">{{ a.sample }}</td>
+    <td class="mono small">{{ a.model or "—" }}</td>
+    <td><span class="badge {{ 'ok' if a.status == 'ok' else 'error' }}">{{ "ok" if a.status == "ok" else "error" }}</span></td>
+    <td class="mono">{{ a.n_sources }}</td>
+    <td><button class="btn small" hx-get="/answers/{{ a.id }}" hx-target="#receipt-box" hx-swap="innerHTML">receipt</button></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+<div id="receipt-box"></div>
+{% endblock %}

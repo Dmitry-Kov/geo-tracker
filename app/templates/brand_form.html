@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit " + brand.name if brand else "New brand" }} · geo-tracker{% endblock %}
+{% block content %}
+<div class="head-row">
+  <h1>{{ "Edit brand" if brand else "New brand" }}</h1>
+  {% if brand %}
+  <div class="row-actions">
+    <form method="post" action="/brands/{{ brand.id }}/run" class="inline">
+      <button class="btn primary" type="submit" {{ "disabled" if busy }}>Run now</button>
+    </form>
+    <form method="post" action="/brands/{{ brand.id }}/delete" class="inline"
+          onsubmit="return confirm('Delete brand and all its runs?')">
+      <button class="btn danger" type="submit">Delete</button>
+    </form>
+  </div>
+  {% endif %}
+</div>
+
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+<div class="card">
+<form method="post" action="{{ '/brands/' ~ brand.id if brand else '/brands' }}">
+  <div class="grid2">
+    <label>Brand name <input name="name" value="{{ values.name }}" required></label>
+    <label>Geo (ISO alpha-2, optional) <input name="geo" value="{{ values.geo }}" placeholder="UZ"></label>
+    <label>Domains — one per line
+      <textarea name="domains" rows="4" required placeholder="example.com">{{ values.domains }}</textarea></label>
+    <label>Queries — one per line
+      <textarea name="queries" rows="4" required placeholder="best crm for small business">{{ values.queries }}</textarea></label>
+    <label>Niche key <input name="niche_key" value="{{ values.niche_key }}" placeholder="main"></label>
+    <label>Niche title <input name="niche_title" value="{{ values.niche_title }}" placeholder="CRM"></label>
+    <label>Primary domain (optional) <input name="primary_domain" value="{{ values.primary_domain }}" placeholder="example.com"></label>
+    <label>Samples per cell <input name="samples" type="number" min="1" value="{{ values.samples }}"></label>
+    <label>Schedule — cron in UTC, empty = manual only
+      <input name="schedule" value="{{ values.schedule }}" placeholder="0 9 * * 1"></label>
+    <fieldset class="engines">
+      <legend>Engines</legend>
+      {% for e in engines_all %}
+      <label class="check"><input type="checkbox" name="engines" value="{{ e }}"
+        {{ "checked" if e in values.engines }}> {{ e }}</label>
+      {% endfor %}
+    </fieldset>
+    {% for e in engines_all %}
+    <label>Model override: {{ e }} (optional)
+      <input name="model_{{ e }}" value="{{ values['model_' ~ e] }}" placeholder="default"></label>
+    {% endfor %}
+    <label>Articles JSON (optional)
+      <textarea name="articles" rows="3" placeholder='{"key": {"title": "...", "url": "https://..."}}'>{{ values.articles }}</textarea></label>
+    <label>Brand aliases JSON (optional)
+      <textarea name="aliases" rows="3" placeholder='{"example.com": ["Example Brand"]}'>{{ values.aliases }}</textarea></label>
+  </div>
+  <button class="btn primary" type="submit">{{ "Save changes" if brand else "Create brand" }}</button>
+</form>
+</div>
+
+{% if brand and runs %}
+<h2>Runs</h2>
+<div class="card">
+<table>
+  <tr><th>#</th><th>Status</th><th>Trigger</th><th>Progress</th><th>Started</th><th></th></tr>
+  {% for r in runs %}
+  <tr>
+    <td class="mono">{{ r.id }}</td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+    <td>{{ r.trigger }}</td>
+    <td class="mono">{{ r.done_calls }}/{{ r.total_calls }}</td>
+    <td class="mono small">{{ r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else "—" }}</td>
+    <td><a class="btn small" href="/runs/{{ r.id }}">Open</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+{% endblock %}
