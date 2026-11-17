@@ -406,14 +406,18 @@ def test_scheduled_tick_waits_for_a_manual_run(client, env):
     t.start()
     time.sleep(0.1)
     with Session() as s:
-        assert s.query(Run).count() == 1                    # still waiting, not skipped
+        waiting = s.get(Run, 2)                             # the wait is a visible run
+        assert waiting.status == "queued" and waiting.trigger == "scheduled"
+        assert waiting.active is None and waiting.config is None
         manual = s.get(Run, 1)
         manual.status, manual.active = "done", None         # the manual run finishes
         s.commit()
     t.join(timeout=20)
     with Session() as s:
+        assert s.query(Run).count() == 2                    # the same row, not a new one
         scheduled = s.get(Run, 2)
         assert scheduled.trigger == "scheduled" and scheduled.status == "done"
+        assert scheduled.config["domains"] == ["brand.io", "other.org"]  # snapshot at start
 
 
 def test_scheduled_tick_that_cannot_start_leaves_a_trace(client, env):

@@ -4,7 +4,9 @@
 <div class="head-row">
   <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ run {{ run.id }}</span></h1>
   <div class="row-actions">
-    {% if active %}
+    {% if active and run.cancel_requested %}
+    <span class="mono small muted">Cancel requested</span>
+    {% elif active %}
     <form method="post" action="/runs/{{ run.id }}/cancel" class="inline">
       <button class="btn danger" type="submit">Cancel</button>
     </form>
@@ -16,6 +18,7 @@
 </div>
 
 {% set poll = True %}{% set refresh = False %}{% include "_progress.html" %}
+{% if notice %}<div class="banner err">{{ notice }}</div>{% endif %}
 <p class="mono small muted">
   trigger={{ run.trigger }}
   {% if run.started_at %} · started {{ run.started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC{% endif %}

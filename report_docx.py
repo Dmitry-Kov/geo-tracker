@@ -302,9 +302,12 @@ STRINGS = {
 
 def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
                domains: list = None, niches: dict = None,
-               articles: dict = None) -> Path:
+               articles: dict = None, notice: str = None) -> Path:
     """Export the report. rows/domains/niches/articles default to the CLI
-    history (results.csv + queries.py); the service passes per-brand data."""
+    history (results.csv + queries.py); the service passes per-brand data.
+
+    notice: a line printed right under the header, before any figure — the
+    service passes it for a run that was cancelled or interrupted."""
     T = STRINGS[lang]
     domains = DOMAINS if domains is None else domains
     niches = NICHES if niches is None else niches
@@ -338,6 +341,8 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
          T["subtitle"].format(latest=latest,
                               ts=datetime.now().strftime('%d.%m.%Y %H:%M')),
          font=F_MONO, size=8.5, color=MUTED, space_after=12)
+    if notice:
+        para(doc, notice, size=10.5, bold=True, color=ACCENT, space_after=12)
 
     # KPI row
     kpi = make_table(doc, 2, 4)

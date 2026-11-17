@@ -177,6 +177,7 @@ h1 .dot{color:var(--accent)}
 .meta{font-family:var(--mono);font-size:12px;color:var(--muted)}
 h2{font:700 17px 'Space Grotesk',sans-serif;margin:36px 0 6px}
 .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+.notice{border:2px solid #D62246;color:#D62246;font-weight:700;border-radius:8px;padding:12px 16px;margin-bottom:24px}
 .kpis{display:flex;gap:0;border:1px solid var(--line);border-radius:10px;background:var(--card);overflow:hidden;flex-wrap:wrap}
 .kpi{flex:1 1 140px;padding:16px 20px;border-right:1px solid var(--line)}
 .kpi:last-child{border-right:0}
@@ -214,6 +215,8 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
   <h1>Optimize<span class="dot">.</span>uz&ensp;GEO Monitor</h1>
   <div class="meta" id="meta"></div>
 </div></header>
+
+<div class="notice" id="notice" hidden></div>
 
 <div class="kpis" id="kpis"></div>
 
@@ -260,6 +263,11 @@ const D = __DATA__;
 
 document.getElementById('meta').textContent =
   `period ${D.dates[0]} — ${D.latest} · generated ${D.generated}`;
+if (D.notice) {
+  const n = document.getElementById('notice');
+  n.textContent = D.notice;
+  n.hidden = false;
+}
 
 /* Trend caption: warn about hidden partial dates */
 if (D.trend_hidden > 0) {
@@ -395,7 +403,10 @@ document.getElementById('foot').textContent =
 
 
 def build_dashboard(rows: list, domains: list, niches: dict, out_path: Path,
-                    articles: dict = None) -> None:
+                    articles: dict = None, notice: str = None) -> None:
+    """notice: a banner shown above every figure — the service passes it for a
+    run that was cancelled or interrupted."""
     data = _prepare(rows, domains, niches, articles)
+    data["notice"] = notice or ""
     html = TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     Path(out_path).write_text(html, encoding="utf-8")

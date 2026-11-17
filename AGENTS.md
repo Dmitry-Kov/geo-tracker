@@ -64,9 +64,20 @@ pass.
   reported whole. (`test_run_crossing_utc_midnight_is_reported_whole`)
 - **Scheduled runs queue, they do not race or vanish.** Same-tick brands run
   one after another; a tick that meets a manual run waits; after
-  `MAX_WAIT_SEC` it is recorded on the brand as a skipped run.
+  `MAX_WAIT_SEC` it is closed as a skipped run.
   (`test_brands_on_the_same_cron_tick_run_one_after_another`,
   `test_scheduled_tick_that_cannot_start_leaves_a_trace`)
+- **A waiting tick is a visible `queued` run.** It can be cancelled, and
+  removing the brand's schedule cancels it. Never wait without a row: an
+  invisible wait cannot be stopped.
+  (`test_waiting_scheduled_tick_is_listed_and_cancellable`,
+  `test_removing_the_schedule_stops_a_waiting_tick`)
+- **Cancel is honored between calls** and leaves status `cancelled` with the
+  answers collected so far; the page shows `cancelling` meanwhile.
+  (`test_cancel_between_calls_keeps_answers_and_frees_slot`)
+- **A run that is not `done` never reads like a full report.** Its page and
+  every export carry `incomplete_notice()`. Any new export or summary must
+  use it. (`test_exports_of_a_cancelled_run_say_so`)
 - **Schedules are crontab lines in UTC.** Build triggers with
   `cron_trigger()`, never `CronTrigger.from_crontab()`: that one numbers
   weekdays from Monday and uses the server's local timezone.
@@ -147,6 +158,8 @@ Found only by running the real thing. Check these classes of change by hand.
 | Settings from `.env` ignored | starting the app with only a `.env` |
 | A database path with `%` broke on Python 3.12 only | CI, different SQLAlchemy |
 | A third-party page title counted as the brand being cited | hand-made examples |
+| Export of a cancelled run looked like a full report | exporting one by hand |
+| A scheduled tick waiting for its turn could not be seen or stopped | driving the scheduler by hand |
 | Geo was documented as unsupported by an API that supports it | reading the API docs |
 
 ## Known gaps

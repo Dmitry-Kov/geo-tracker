@@ -20,6 +20,10 @@ from .db import Answer, ArticleHit, Brand, Hit, Run, utcnow
 
 SLEEP_SEC = 2.0
 ACTIVE = ("pending", "running")
+# A scheduled tick that has to wait for the active slot is a run too: a row
+# with this status, so the wait is visible on the brand and can be cancelled.
+QUEUED = "queued"
+WAITING = ACTIVE + (QUEUED,)   # everything that is not over yet
 # Rough per-call wall time observed in live runs (latency + the 2s pause).
 # An estimate shown before launching, not a promise.
 EST_SEC_PER_CALL = 15
@@ -87,7 +91,7 @@ def recover_interrupted(Session) -> int:
     """
     with Session() as s:
         stale = s.query(Run).filter(or_(Run.active == 1,
-                                        Run.status.in_(ACTIVE))).all()
+                                        Run.status.in_(WAITING))).all()
         for run in stale:
             run.status = "error"
             run.error = INTERRUPTED
@@ -97,14 +101,89 @@ def recover_interrupted(Session) -> int:
         return len(stale)
 
 
-def record_skipped(Session, brand_id: int, reason: str) -> None:
-    """Leave a visible trace of a scheduled run that never started."""
+def queue_run(Session, brand_id: int, trigger: str = "scheduled"):
+    """Record a run that is waiting for the active slot; None if the brand is gone.
+
+    The row holds no slot (active stays NULL) and no config yet — the snapshot
+    is taken when the run actually starts, so it measures the brand as it is
+    then, not as it was when the wait began.
+    """
     with Session() as s:
         if s.get(Brand, brand_id) is None:
-            return
-        s.add(Run(brand_id=brand_id, status="error", trigger="scheduled",
-                  error=reason, finished_at=utcnow()))
+            return None
+        run = Run(brand_id=brand_id, status=QUEUED, trigger=trigger)
+        s.add(run)
         s.commit()
+        return run.id
+
+
+def claim_queued(Session, run_id: int, take_slot: bool = True) -> str:
+    """Move a queued run forward. Returns:
+
+    "claimed" — it now holds the active slot as a pending run (execute it);
+    "busy"    — still waiting (the slot is taken, or take_slot is False);
+    "closed"  — it will not run: cancelled by the user, its brand's schedule
+                was removed while it waited, or the run/brand is gone.
+    """
+    with Session() as s:
+        run = s.get(Run, run_id)
+        if run is None or run.status != QUEUED:
+            return "closed"
+        brand = run.brand
+        reason = None
+        if run.cancel_requested:
+            reason = ""
+        elif run.trigger == "scheduled" and not brand.schedule:
+            reason = "the brand's schedule was removed while this run was waiting"
+        if reason is not None:
+            run.status = "cancelled"
+            run.error = reason
+            run.finished_at = utcnow()
+            s.commit()
+            return "closed"
+        if not take_slot:
+            return "busy"
+        run.active = 1
+        run.status = "pending"
+        run.config = brand_config(brand)
+        try:
+            s.commit()
+        except IntegrityError:  # another run still holds the slot
+            s.rollback()
+            return "busy"
+        return "claimed"
+
+
+def close_queued(Session, run_id: int, error: str) -> None:
+    """Give up on a queued run, leaving the reason on it."""
+    with Session() as s:
+        run = s.get(Run, run_id)
+        if run is None or run.status != QUEUED:
+            return
+        run.status = "error"
+        run.error = error
+        run.finished_at = utcnow()
+        s.commit()
+
+
+STATUS_RU = {"cancelled": "отменён", "error": "прерван с ошибкой"}
+
+
+def incomplete_notice(run: Run, lang: str = "en"):
+    """Text that must accompany any figures taken from a run that is not done;
+    None for a completed run. A cancelled or interrupted run has measured only
+    part of its matrix: without this line its report reads like a full one."""
+    if run.status == "done":
+        return None
+    if lang == "ru":
+        status = STATUS_RU.get(run.status, "ещё не завершён")
+        return (f"Неполный прогон — {status}: выполнено {run.done_calls} из "
+                f"{run.total_calls} запланированных вызовов. Цифры ниже относятся "
+                f"только к собранным ответам и не являются полным измерением.")
+    status = run.status if run.status in STATUS_RU else "not finished"
+    return (f"Incomplete run — {status}: {run.done_calls} of {run.total_calls} "
+            f"planned calls were made. The figures below cover only the answers "
+            f"collected and are not a full measurement.")
 
 
 def to_csv_row(a: Answer, domains: list, articles: dict, run_date: str = None) -> dict:

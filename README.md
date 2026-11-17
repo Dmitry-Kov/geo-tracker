@@ -391,8 +391,12 @@ the service does not need it.
   dialog with that number is required, and the server refuses a bare POST
   without it. **Cancel** stops a run between calls: the in-flight answer
   finishes, everything collected is kept, the run gets status `cancelled`
-  and the active slot is freed. A scheduled run still waiting in the queue
-  can be cancelled too — it will make no calls.
+  and the active slot is freed. After the click the page shows
+  `cancelling` until that call ends. A run that is not `done` — cancelled,
+  or interrupted by a restart — carries an "Incomplete run" line on its page
+  and at the top of every export (HTML and DOCX, both languages), and its
+  export file names end in the status: a partial run cannot pass for a full
+  report.
 - **Results**: visibility matrix, the same audit-grade 95% CI (Wilson /
   cluster bootstrap), resource-usage summary; export the branded HTML
   dashboard or DOCX (en/ru) per run.
@@ -415,8 +419,12 @@ the service does not need it.
 - **Scheduler**: APScheduler cron per brand, **in UTC** (`0 9 * * 1` =
   Mondays 09:00 UTC). Scheduled runs queue: brands on the same tick run one
   after another, and a tick that lands on a manual run waits for it. A tick
-  that still cannot start after 6 hours is recorded on the brand as a skipped
-  run. Schedules are not persisted across downtime — a tick missed while the
+  that has to wait is listed on the brand as a `queued` run: it can be
+  cancelled there, and removing the brand's schedule cancels it too; it makes
+  no calls until its turn. One that still cannot start after 6 hours is
+  closed as a skipped run. Scheduled runs are not gated by the >100-call
+  confirmation — check the estimate on the brand page before setting a
+  schedule. Schedules are not persisted across downtime — a tick missed while the
   service was stopped is not replayed.
 - **Database & migrations**: the schema is managed by Alembic
   (`migrations/`, baseline `0001` = the exact pre-Alembic schema). On

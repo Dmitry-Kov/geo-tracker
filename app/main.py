@@ -31,8 +31,8 @@ from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 from .db import Answer, Brand, Run, make_engine, make_session_factory, migrate_database
 from .login_guard import LoginLimiter
-from .runner import (ACTIVE, BIG_RUN_CONFIRM, execute_run, recover_interrupted,
-                     run_estimate, run_rows, start_run)
+from .runner import (BIG_RUN_CONFIRM, WAITING, execute_run, incomplete_notice,
+                     recover_interrupted, run_estimate, run_rows, start_run)
 from .scheduler import cron_trigger, make_scheduler
 
 APP_DIR = Path(__file__).resolve().parent
@@ -398,7 +398,7 @@ def create_app(db_path=None) -> FastAPI:
             run = s.get(Run, run_id)
             if run is None:
                 raise HTTPException(404, "run not found")
-            if run.status in ACTIVE:
+            if run.status in WAITING:  # running, pending, or queued behind another run
                 run.cancel_requested = 1
                 s.commit()
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
@@ -437,7 +437,9 @@ def create_app(db_path=None) -> FastAPI:
                 agg["cost_known"] = True
         return {"run": run, "brand": b, "cfg": cfg, "matrix": matrix, "audit": audit,
                 "usage": usage, "answers": list(run.answers),
-                "active": run.status in ACTIVE,
+                "active": run.status in WAITING,
+                # shown once the run is over without being done
+                "notice": None if run.status in WAITING else incomplete_notice(run),
                 "B": DEFAULT_B, "seed": DEFAULT_SEED, "N": MIN_BOOTSTRAP_QUERIES}
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
@@ -478,8 +480,9 @@ def create_app(db_path=None) -> FastAPI:
             fd, tmp = tempfile.mkstemp(suffix=".html")
             os.close(fd)
             build_dashboard(rows, cfg["domains"], cfg["niches"], Path(tmp),
-                            articles=cfg["articles"])
-        return FileResponse(tmp, filename=f"geo_dashboard_{b.name}_{run_id}.html",
+                            articles=cfg["articles"], notice=incomplete_notice(run))
+            tag = "" if run.status == "done" else f"_{run.status}"
+        return FileResponse(tmp, filename=f"geo_dashboard_{b.name}_{run_id}{tag}.html",
                             background=BackgroundTask(os.unlink, tmp))
 
     @app.get("/runs/{run_id}/report.docx", dependencies=[Depends(auth_guard)])
@@ -495,8 +498,10 @@ def create_app(db_path=None) -> FastAPI:
             fd, tmp = tempfile.mkstemp(suffix=".docx")
             os.close(fd)
             build_docx(Path(tmp), lang=lang, rows=rows, domains=cfg["domains"],
-                       niches=cfg["niches"], articles=cfg["articles"])
-        return FileResponse(tmp, filename=f"geo_report_{lang}_{b.name}_{run_id}.docx",
+                       niches=cfg["niches"], articles=cfg["articles"],
+                       notice=incomplete_notice(run, lang))
+            tag = "" if run.status == "done" else f"_{run.status}"
+        return FileResponse(tmp, filename=f"geo_report_{lang}_{b.name}_{run_id}{tag}.docx",
                             background=BackgroundTask(os.unlink, tmp))
 
     # -- settings -----------------------------------------------------------

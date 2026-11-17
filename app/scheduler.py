@@ -3,9 +3,10 @@
 
 Runs are strictly one at a time, so scheduled runs queue instead of racing:
 brands that share a cron tick execute one after another, and a tick that
-lands on a manual run waits for it to finish. A scheduled run that still
-cannot start after MAX_WAIT_SEC is recorded on the brand as a skipped run —
-never dropped silently.
+lands on a manual run waits for it to finish. A tick that has to wait is a
+run with status "queued" — visible on the brand and cancellable; removing
+the brand's schedule cancels it too. One that still cannot start after
+MAX_WAIT_SEC is closed as skipped — never dropped silently.
 """
 import re
 import threading
@@ -15,7 +16,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .db import Brand
-from .runner import execute_run, record_skipped, start_run
+from .runner import (claim_queued, close_queued, execute_run, queue_run,
+                     start_run)
 
 POLL_SEC = 5.0
 MAX_WAIT_SEC = 6 * 3600
@@ -73,23 +75,44 @@ def make_scheduler(Session):
     stopping = threading.Event()
 
     def scheduled_run(brand_id: int) -> None:
-        with queue:
-            deadline = time.monotonic() + MAX_WAIT_SEC
+        deadline = time.monotonic() + MAX_WAIT_SEC
+        run_id = None  # the queued run, once this tick has to wait
+        locked = queue.acquire(blocking=False)
+        try:
             while not stopping.is_set():
-                with Session() as s:
-                    if s.get(Brand, brand_id) is None:
-                        return  # brand deleted while the tick was queued
-                run_id = start_run(Session, brand_id, trigger="scheduled")
-                if run_id is not None:
+                if not locked:
+                    # Behind another scheduled run: wait for the queue, but as
+                    # a visible queued run so the wait can be cancelled.
+                    if run_id is None:
+                        run_id = queue_run(Session, brand_id)
+                        if run_id is None:
+                            return  # brand deleted
+                    locked = queue.acquire(timeout=POLL_SEC)
+                elif run_id is None:
+                    started = start_run(Session, brand_id, trigger="scheduled")
+                    if started is not None:
+                        execute_run(Session, started)
+                        return
+                    run_id = queue_run(Session, brand_id)  # a manual run holds the slot
+                    if run_id is None:
+                        return  # brand deleted
+                outcome = claim_queued(Session, run_id, take_slot=locked)
+                if outcome == "claimed":
                     execute_run(Session, run_id)
                     return
+                if outcome == "closed":
+                    return  # cancelled, schedule removed, or brand deleted
                 if time.monotonic() >= deadline:
-                    record_skipped(
-                        Session, brand_id,
+                    close_queued(
+                        Session, run_id,
                         f"skipped: another run was still active after "
                         f"{MAX_WAIT_SEC // 3600}h of waiting")
                     return
-                stopping.wait(POLL_SEC)
+                if locked:
+                    stopping.wait(POLL_SEC)
+        finally:
+            if locked:
+                queue.release()
 
     def sync(brand_id: int, schedule: str) -> None:
         job_id = f"brand-{brand_id}"
