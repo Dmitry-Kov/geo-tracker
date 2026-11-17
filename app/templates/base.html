@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}geo-tracker{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap bar">
+    <a class="logo" href="/">geo<span>.</span>tracker</a>
+    <nav>
+      <a href="/">Brands</a>
+      <a href="/settings">Settings</a>
+      {% if auth_enabled and authed %}
+      <form method="post" action="/logout" class="inline"><button class="link">Logout</button></form>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+<main class="wrap" id="main">
+{% block content %}{% endblock %}
+</main>
+<footer class="wrap foot">audit-grade GEO monitoring · core: geo_tracker.py + sov_stats.py</footer>
+</body>
+</html>

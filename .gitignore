@@ -6,6 +6,7 @@ queries_*.py
 # данные замеров и отчёты (содержат клиентские домены)
 results*.csv
 answers.jsonl
+geo_tracker.db
 *.log
 dashboard*.html
 manual_*.csv

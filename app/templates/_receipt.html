@@ -1,0 +1,26 @@
+<div class="card receipt">
+  <div class="head-row">
+    <h3>Receipt <span class="mono muted">{{ a.id }}</span></h3>
+    <button class="btn small" onclick="document.getElementById('receipt-box').innerHTML=''">Close</button>
+  </div>
+  <p class="mono small">
+    engine={{ a.engine }} · model={{ a.model or "—" }}
+    {% if a.model_requested and a.model_requested != a.model %}(requested: {{ a.model_requested }}){% endif %}
+    · geo={{ a.geo or "—" }}{% if a.geo %} (applied={{ a.geo_applied }}){% endif %}
+    · sample={{ a.sample }} · status={{ a.status }}
+  </p>
+  {% if a.receipt %}
+  <details open><summary>Answer text ({{ a.answer_chars }} chars)</summary>
+    <pre class="text">{{ a.receipt.text }}</pre></details>
+  <details><summary>Sources ({{ a.n_sources }})</summary>
+    <ol class="small">{% for u in a.receipt.urls %}<li class="mono">{{ u }}</li>{% endfor %}</ol>
+    {% if a.receipt.titles %}<p class="mono small muted">titles: {{ a.receipt.titles | join(" · ") }}</p>{% endif %}
+  </details>
+  {% if a.receipt.usage %}
+  <details><summary>Usage (raw API report)</summary>
+    <pre class="text">{{ a.receipt.usage | tojson(indent=2) }}</pre></details>
+  {% endif %}
+  {% else %}
+  <p class="muted">No receipt — this row is an error.</p>
+  {% endif %}
+</div>

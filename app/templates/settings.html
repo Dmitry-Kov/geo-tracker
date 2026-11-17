@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Settings · geo-tracker{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<div class="card">
+  <h2>Engine keys</h2>
+  <table>
+    <tr><th>Engine</th><th>API key</th></tr>
+    {% for e, present in keys.items() %}
+    <tr><td class="mono">{{ e }}</td>
+      <td><span class="badge {{ 'done' if present else 'error' }}">{{ "set" if present else "missing" }}</span></td></tr>
+    {% endfor %}
+  </table>
+  <p class="small muted">Keys live in .env (never shown here). Models can be overridden per brand.</p>
+</div>
+<div class="card">
+  <h2>Service</h2>
+  <p class="mono small">auth: {{ "password (APP_PASSWORD)" if auth_enabled else "local mode — no password" }}</p>
+  <p class="mono small">db: {{ db_path }}</p>
+  <h2>Scheduled jobs</h2>
+  {% if jobs %}
+  <table>
+    <tr><th>Job</th><th>Next run (UTC)</th></tr>
+    {% for j in jobs %}<tr><td class="mono">{{ j.id }}</td><td class="mono">{{ j.next }}</td></tr>{% endfor %}
+  </table>
+  {% else %}<p class="muted">No schedules — set a cron on a brand.</p>{% endif %}
+</div>
+{% endblock %}

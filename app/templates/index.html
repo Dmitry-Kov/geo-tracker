@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Brands · geo-tracker{% endblock %}
+{% block content %}
+<div class="head-row">
+  <h1>Brands</h1>
+  <a class="btn primary" href="/brands/new">+ New brand</a>
+</div>
+{% if brands %}
+<div class="card">
+<table>
+  <tr><th>Brand</th><th>Domains</th><th>Niche</th><th>Samples</th><th>Schedule</th><th>Latest run</th><th></th></tr>
+  {% for b in brands %}
+  <tr>
+    <td><a href="/brands/{{ b.id }}"><strong>{{ b.name }}</strong></a></td>
+    <td class="mono small">{{ b.domains | join(", ") }}</td>
+    <td>{{ (b.niches.values() | list | first).title if b.niches else "—" }}</td>
+    <td class="mono">{{ b.samples }}</td>
+    <td class="mono small">{{ b.schedule or "manual" }}</td>
+    <td>
+      {% set r = latest[b.id] %}
+      {% if r %}<a class="badge {{ r.status }}" href="/runs/{{ r.id }}">{{ r.status }}</a>
+      {% else %}<span class="muted">never</span>{% endif %}
+    </td>
+    <td><a class="btn small" href="/brands/{{ b.id }}">Open</a></td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<div class="card empty">
+  <p>No brands yet. Create one: domains to track, a niche with queries, engines and geo.</p>
+  <a class="btn primary" href="/brands/new">+ Create the first brand</a>
+</div>
+{% endif %}
+{% endblock %}
