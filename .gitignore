@@ -15,6 +15,7 @@ geo_report_*.docx
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
 
 # macOS
 .DS_Store

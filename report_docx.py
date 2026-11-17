@@ -30,6 +30,7 @@ try:
     from queries import ARTICLES  # optional page-level tracking, see geo_tracker.py
 except ImportError:
     ARTICLES = {}
+from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
@@ -194,6 +195,23 @@ STRINGS = {
         "visibility_note": "Share of the niche's queries where the domain appeared in the "
                            "answer's sources (src) or text (txt). ★ — niche's primary domain.",
         "col_niche": "niche",
+        "h_uncertainty": "Measurement uncertainty",
+        "uncertainty_note": "Share of voice with a 95% confidence interval — latest run {latest}, "
+                            "grounded answers only (the engine ran a web search), all samples. "
+                            "Cell: point share [interval], queries (nq) and samples (n).",
+        "uncertainty_method": "Method: the interval counts evidence per query, not per "
+                              "answer — repeated answers to one query are correlated. Fewer "
+                              "than {N} queries behind a cell, or a share of exactly 0% / "
+                              "100%: Wilson score interval with n = nq (each query is one "
+                              "observation — the conservative reading). {N}+ queries: "
+                              "cluster bootstrap over queries, whole queries resampled with "
+                              "all their samples (B={B} resamples, seed={seed}). "
+                              "Reproducible from the same rows.",
+        "prov_models": "Models (latest run): {models}",
+        "prov_geo_applied": "Requested geo: {geo} — applied by {applied}; for any other "
+                            "engine it is only recorded (this tracker sends it no locality).",
+        "prov_geo_recorded": "Requested geo: {geo} — recorded only; not sent to any engine "
+                             "in this run.",
         "h_articles": "Article citations",
         "articles_note": "Tracked pages found among the answer's sources: how many answers "
                          "in the current snapshot cited each page, and for which queries.",
@@ -228,6 +246,25 @@ STRINGS = {
         "visibility_note": "Доля запросов ниши, где домен попал в источники (src) или текст "
                            "ответа (txt). ★ — целевой домен ниши.",
         "col_niche": "ниша",
+        "h_uncertainty": "Неопределённость измерения",
+        "uncertainty_note": "Доля голоса с 95% доверительным интервалом — последний прогон "
+                            "{latest}, только grounded-ответы (движок выполнил веб-поиск), "
+                            "все замеры. Ячейка: точечная доля [интервал], запросы (nq) и "
+                            "замеры (n).",
+        "uncertainty_method": "Метод: свидетельством считается запрос, а не отдельный "
+                              "ответ — повторные ответы на один запрос коррелированы. Если "
+                              "за ячейкой меньше {N} запросов или доля ровно 0% / 100% — "
+                              "интервал Уилсона с n = nq (один запрос — одно наблюдение, "
+                              "консервативная оценка). От {N} запросов — кластерный "
+                              "бутстрап по запросам, запросы ресемплируются целиком со "
+                              "всеми замерами (B={B} ресемплов, seed={seed}). "
+                              "Воспроизводимо на тех же строках.",
+        "prov_models": "Модели (последний прогон): {models}",
+        "prov_geo_applied": "Запрошенное гео: {geo} — применяется в {applied}; для "
+                            "остальных движков только записано (трекер не передаёт им "
+                            "локальность).",
+        "prov_geo_recorded": "Запрошенное гео: {geo} — только записано; ни одному движку "
+                             "этого прогона не передавалось.",
         "h_articles": "Цитирование статей",
         "articles_note": "Отслеживаемые страницы среди источников ответа: сколько ответов "
                          "текущего среза сослались на каждую и по каким запросам.",
@@ -314,6 +351,43 @@ def build_docx(out_path: Path, lang: str = "en") -> Path:
             pct_cell(m.rows[r_i].cells[c_i], by_dom[d],
                      primary=d == cfg["primary_domain"])
         r_i += 1
+
+    # Audit-grade uncertainty: ALL samples of the latest run, grounded channel.
+    # The snapshot matrix above keeps its semantics; this section is additive.
+    latest_ok = [r for r in ok if r["run_date"] == latest]
+    audit = sov_stats(latest_ok, DOMAINS, NICHES, grounded=True)
+    if any(audit.values()):
+        heading(doc, T["h_uncertainty"])
+        para(doc, T["uncertainty_note"].format(latest=latest), size=9, color=MUTED)
+        niches_with_data = [n for n in NICHES if audit.get(n)]
+        ut = make_table(doc, len(niches_with_data) + 1, len(DOMAINS) + 1)
+        header_row(ut, [T["col_niche"]] + [short[d] for d in DOMAINS])
+        for r_i, niche in enumerate(niches_with_data, start=1):
+            fill_cell(ut.rows[r_i].cells[0], NICHES[niche]["title"],
+                      size=9, bold=True, center=False)
+            for c_i, d in enumerate(DOMAINS, start=1):
+                st = audit[niche].get(d)
+                if st is None:
+                    fill_cell(ut.rows[r_i].cells[c_i], "—", size=9, color=MUTED)
+                    continue
+                text = (f"{st['point']:.1f}% [{st['lo']:.1f}–{st['hi']:.1f}]\n"
+                        f"nq={st['n_queries']} · n={st['n_samples']}")
+                fill_cell(ut.rows[r_i].cells[c_i], text, font=F_MONO, size=8, bold=True,
+                          fill=ACCENT_SOFT if st["point"] > 0 else None)
+        para(doc, T["uncertainty_method"].format(B=DEFAULT_B, seed=DEFAULT_SEED,
+                                             N=MIN_BOOTSTRAP_QUERIES),
+             size=8.5, color=MUTED)
+        models = sorted({r.get("model") or "" for r in latest_ok} - {""})
+        geos = sorted({r.get("geo") or "" for r in latest_ok} - {""})
+        if models:
+            para(doc, T["prov_models"].format(models=", ".join(models)),
+                 font=F_MONO, size=8.5, color=MUTED, space_after=3)
+        if geos:
+            applied = sorted({r["engine"] for r in latest_ok
+                              if r.get("geo_applied") == "1"})
+            key = "prov_geo_applied" if applied else "prov_geo_recorded"
+            para(doc, T[key].format(geo=", ".join(geos), applied=", ".join(applied)),
+                 font=F_MONO, size=8.5, color=MUTED, space_after=3)
 
     # Tracked pages (page-level), only when queries.py defines ARTICLES
     if ARTICLES:

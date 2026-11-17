@@ -9,6 +9,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
+
 # Brand colors for domains on charts (stable across reports)
 DOMAIN_COLORS = ["#FF5C1F", "#1F7A8C", "#6A4C93", "#2A9D8F", "#E0A100", "#D62246"]
 
@@ -113,6 +115,19 @@ def _prepare(rows: list, domains: list, niches: dict, articles: dict = None) -> 
             "queries": [{"engine": r["engine"], "query": r["query"]} for r in cited],
         })
 
+    # Audit-grade view: ALL samples of the latest run (not the freshest-per-pair
+    # snapshot), grounded channel only — the defensible number with its CI.
+    # The snapshot above keeps its semantics; this section is additive.
+    latest_ok = [r for r in ok if r["run_date"] == latest]
+    audit = sov_stats(latest_ok, domains, niches, grounded=True)
+    audit_meta = {
+        "B": DEFAULT_B, "seed": DEFAULT_SEED, "min_bootstrap": MIN_BOOTSTRAP_QUERIES,
+        "models": sorted({r.get("model") or "" for r in latest_ok} - {""}),
+        "geo": sorted({r.get("geo") or "" for r in latest_ok} - {""}),
+        "geo_applied_engines": sorted({r["engine"] for r in latest_ok
+                                       if r.get("geo_applied") == "1"}),
+    }
+
     return {
         "generated": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "dates": dates,
@@ -132,6 +147,8 @@ def _prepare(rows: list, domains: list, niches: dict, articles: dict = None) -> 
         "leaderboard": leaderboard,
         "current_hits": current_hits,
         "articles": article_rows,
+        "audit": audit,
+        "audit_meta": audit_meta,
     }
 
 
@@ -176,6 +193,7 @@ table.matrix{width:100%;border-collapse:collapse;background:var(--card);border:1
 .matrix td.qs{text-align:left;font-size:12px}
 .cell{font-family:var(--mono);font-weight:700;border-radius:6px;padding:6px 0;display:block;min-width:54px}
 .cell.primary{outline:2px solid var(--ink);outline-offset:-2px}
+.ci{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);font-weight:500;margin-top:2px}
 .legend{font-size:12px;color:var(--muted);margin-top:8px}
 .legend .pr{display:inline-block;width:11px;height:11px;border:2px solid var(--ink);border-radius:3px;vertical-align:-1px;margin-right:4px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px}
@@ -203,6 +221,13 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <div class="sub">Share of the niche's queries where the domain appeared in the answer's sources or text. Current snapshot: the freshest answer per pair (engine × niche × query), regardless of run date.</div>
 <table class="matrix" id="matrix"></table>
 <div class="legend"><span class="pr"></span>niche's primary domain · fill intensity — visibility level</div>
+
+<section id="auditSec" hidden>
+<h2>Measurement uncertainty</h2>
+<div class="sub" id="auditSub"></div>
+<table class="matrix" id="audit"></table>
+<div class="legend" id="auditMethod"></div>
+</section>
 
 <section id="articlesSec" hidden>
 <h2>Article citations</h2>
@@ -268,6 +293,40 @@ for (const [niche, info] of Object.entries(D.niches)) {
 }
 document.getElementById('matrix').innerHTML = html;
 
+/* Audit-grade SOV: all samples of the latest run, grounded channel, 95% CI */
+if (Object.values(D.audit).some(row => Object.keys(row).length)) {
+  document.getElementById('auditSec').hidden = false;
+  document.getElementById('auditSub').textContent =
+    `Latest run ${D.latest}, grounded answers only (the engine ran a web search), all samples. ` +
+    `The matrix above is a quick snapshot; this is the defensible number with its uncertainty.`;
+  let ah = '<tr><th></th>' + D.domains.map(d => `<th class="dom">${d}</th>`).join('') + '</tr>';
+  for (const [niche, info] of Object.entries(D.niches)) {
+    const row = D.audit[niche];
+    if (!row || !Object.keys(row).length) continue;
+    ah += `<tr><td class="niche">${info.title}</td>` + D.domains.map(d => {
+      const st = row[d];
+      if (!st) return '<td>—</td>';
+      const pr = d === info.primary ? ' primary' : '';
+      return `<td><span class="cell${pr}" style="background:${shade(st.point)};color:${fg(st.point)}">${st.point.toFixed(1)}%</span>` +
+        `<span class="ci">[${st.lo.toFixed(1)}–${st.hi.toFixed(1)}]</span>` +
+        `<span class="ci">nq=${st.n_queries} · n=${st.n_samples}</span></td>`;
+    }).join('') + '</tr>';
+  }
+  document.getElementById('audit').innerHTML = ah;
+  const m = D.audit_meta;
+  let method = `The 95% CI counts evidence per query, not per answer: repeated answers to one query are correlated. ` +
+    `Fewer than ${m.min_bootstrap} queries behind a cell, or a share of exactly 0% / 100%: Wilson score interval ` +
+    `with n = nq (each query is one observation — the conservative reading). ` +
+    `${m.min_bootstrap}+ queries: cluster bootstrap over queries, whole queries resampled with all their samples ` +
+    `(B=${m.B}, seed=${m.seed}). Reproducible from the same rows.`;
+  if (m.models.length) method += ` Models: ${m.models.join(', ')}.`;
+  if (m.geo.length) method += ` Requested geo: ${m.geo.join(', ')} — ` +
+    (m.geo_applied_engines.length
+      ? `applied by ${m.geo_applied_engines.join(', ')}; for any other engine it is only recorded (this tracker sends it no locality).`
+      : `recorded only; not sent to any engine in this run.`);
+  document.getElementById('auditMethod').textContent = method;
+}
+
 /* Tracked articles */
 if (D.articles.length) {
   document.getElementById('articlesSec').hidden = false;
@@ -327,6 +386,7 @@ document.getElementById('hits').innerHTML = D.current_hits.length
 
 document.getElementById('foot').textContent =
   `Pairs in current snapshot: ${D.n_pairs}. API errors across all history: ${D.n_errors}. ` +
+  (D.audit_meta.models.length ? `Models (latest run): ${D.audit_meta.models.join(', ')}. ` : '') +
   `Data source: results.csv · geo_tracker.py`;
 </script>
 </body>

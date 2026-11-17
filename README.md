@@ -27,6 +27,20 @@ detection to fight.
 - Grounded vs ungrounded split: answers that came with no sources at all
   (the engine skipped its search tool and replied from parametric memory)
   are reported as a separate channel instead of diluting share of voice
+- Audit-grade provenance: every CSV row and raw receipt records the
+  **model**, the **requested geo** (and whether the engine actually applied
+  it), and the **sample number** — model drift and locality are visible
+- Repeated sampling (`run --samples N`): N answers per cell, so visibility
+  can be reported as a distribution instead of one non-deterministic answer
+- Share of voice with a **95% confidence interval** (console, HTML dashboard,
+  DOCX) that counts evidence per query, not per answer, because repeated
+  samples of one query are correlated: a Wilson interval over queries for
+  small query sets, a seeded cluster bootstrap for large ones. Reproducible
+  from the same rows
+- Geo axis: `run --geo CC` is applied by OpenAI and Perplexity (country-level
+  `user_location`); the Gemini adapter sends no locality yet, so for Gemini
+  the geo is recorded as requested, not applied — a documented limitation of
+  this tracker
 - Every source domain is recorded, tracked or not (`all_source_domains`), so
   you can see who the engines cite *instead* of you
 - Raw answers archived to `answers.jsonl`, keyed to their CSV row — re-read
@@ -120,12 +134,81 @@ AI answers are non-deterministic: the same query gives different answers on
 different days. Watch the trend across several runs, not a single
 measurement.
 
+**Provenance and sampling.** Every row carries `model`, `geo`, `geo_applied`
+and `sample` columns (and the raw receipt carries them too): which model
+answered, which country was requested, whether the engine applied it, and
+which repeat sample this is. `run --samples N` collects N answers per cell
+(engine × niche × query); `--geo CC` requests a country (ISO alpha-2). OpenAI
+(`web_search` → `user_location`) and Perplexity (`web_search_options` →
+`user_location`) receive it as a country-level hint, `geo_applied=1`. The
+Gemini adapter sends no locality — not implemented here — so Gemini rows
+record the geo with `geo_applied=0`. `model` is the model the API reports
+having served the answer (Gemini `modelVersion`, OpenAI/Perplexity `model`),
+falling back to the requested name; the receipt also keeps `model_requested`.
+
+**Resource usage (COGS evidence).** Each receipt archives the API's own usage
+report as-is: tokens (Gemini `usageMetadata`, OpenAI/Perplexity `usage`), the
+number of executed searches (Gemini `webSearchQueries`; OpenAI
+`web_search_call` actions of type `search` — `open_page`/`find_in_page` are
+browsing, not searches; Sonar reports no count → `null`), and — for
+Perplexity — the actual billed cost (`usage.cost.total_cost`). `report`
+prints a per-engine summary for the latest run. No price tables or guesses:
+only what the APIs themselves reported; older receipts without usage show
+`—`, not fabricated zeros. The summary is a **lower bound**: only successful
+answers are counted — failed calls and HTTP retries never reach a receipt
+and are excluded.
+
+**Measurement uncertainty.** A single "17% mention share" is false precision.
+Alongside the point matrix, the reports show the share with a **95%
+confidence interval whose unit of evidence is the query, not the answer** —
+repeated samples of one query are correlated and must not be counted as
+independent. Every interval carries `nq`/`n` (queries/samples). The estimator
+depends on how many queries stand behind the cell:
+
+- **fewer than 30 queries, or a share of exactly 0% / 100%** — a Wilson score
+  interval with n = `nq`: each query is one observation, the conservative
+  reading. 0 hits across 10 queries reads `0.0% [0.0–27.8]`, one hit in 30
+  samples over the same 10 queries `3.3% [0.2–32.3]`. A bootstrap is not
+  used here: on a handful of clusters it comes out too narrow, and when every
+  query agrees it collapses to a falsely certain `[0.0–0.0]`.
+- **30 queries or more** — a percentile cluster bootstrap over queries
+  (B=2000 resamples, seed=0): whole queries are resampled with all their
+  samples, so the interval also reflects how much the queries differ.
+
+Both are reproducible from the same rows. Practical consequence: with a
+typical 5–15 queries per niche the interval is wide and **narrows with more
+queries, not with more samples** — `--samples` steadies the point share.
+The audit section covers all
+grounded samples of the latest run; the legacy snapshot matrix (freshest
+answer per pair) keeps its semantics.
+
+**Provenance columns and old histories.** `model`, `geo`, `geo_applied`,
+`sample` were inserted after `query`, so the schema guard refuses to append
+to a pre-audit `results.csv`. To keep an old history, migrate it once — old
+rows get empty provenance, which is the truth about them:
+
+```bash
+python3 - <<'EOF'
+import csv
+path = "results.csv"
+with open(path, newline="", encoding="utf-8-sig") as f:
+    reader = csv.DictReader(f)
+    rows, old = list(reader), reader.fieldnames
+i = old.index("query") + 1
+new = old[:i] + ["model", "geo", "geo_applied", "sample"] + old[i:]
+with open(path, "w", newline="", encoding="utf-8-sig") as f:
+    writer = csv.DictWriter(f, fieldnames=new)
+    writer.writeheader()
+    writer.writerows(rows)
+EOF
+```
+
 ## Commands
 
 ### `run` — query the engines
 
 ```bash
-python geo_tracker.py run [--engines LIST] [--niches LIST] [--limit N] [--sleep SEC] [--resume]
+python geo_tracker.py run [--engines LIST] [--niches LIST] [--limit N] [--sleep SEC] [--samples N] [--geo CC] [--resume]
 ```
 
 | Flag | Meaning |
@@ -134,7 +217,9 @@ python geo_tracker.py run [--engines LIST] [--niches LIST] [--limit N] [--sleep 
 | `--niches` | comma-separated subset of niche keys from `queries.py` |
 | `--limit N` | max queries per niche — cheap smoke tests |
 | `--sleep SEC` | pause between API calls, default 2 |
-| `--resume` | skip (engine, niche, query) triples that already have an ok row in **any** prior run — fills an unfinished matrix without re-spending quota on duplicates |
+| `--samples N` | answers per cell (engine × niche × query), default 1. Each sample is a separate row + receipt and spends quota; repeated samples steady the point share (the CI narrows with more queries, not more samples) |
+| `--geo CC` | requested country, ISO alpha-2 (e.g. `UZ`). Applied by OpenAI and Perplexity (`user_location`); for Gemini it is only recorded — this tracker sends Gemini no locality |
+| `--resume` | count ok rows per (engine, niche, query) triple **with the same `--geo`** across all prior runs and fetch only what is missing up to `--samples` — fills an unfinished matrix (including a cell cut off mid-samples) without re-spending quota on duplicates |
 
 Errors don't abort the run: the row is recorded with an `error:` status and
 the run continues. On a daily-quota 429 (`RESOURCE_EXHAUSTED` with a
@@ -147,9 +232,14 @@ server-suggested retry; finish the remainder later with `--resume`.
 python geo_tracker.py report [--out PATH]
 ```
 
-Prints the share-of-voice matrix and domain leaderboard for the latest run
-and writes `dashboard.html` — a single self-contained file (Chart.js loads
-from a CDN, so opening it needs internet).
+Prints the share-of-voice matrix and domain leaderboard for the latest run,
+plus a **measurement-uncertainty** table (95% CI per
+niche × domain, with `nq`/`n`, methodology and provenance: models used,
+requested geo and which engines applied it) and a **resource-usage** summary
+per engine (calls, tokens, executed searches, API-reported cost — from the
+raw receipts), and writes `dashboard.html` —
+a single self-contained file (Chart.js loads from a CDN, so opening it needs
+internet) with the same audit section.
 
 ### `manual-export` / `manual-import` — engines without an API
 
@@ -172,8 +262,8 @@ python report_docx.py [--out PATH]   # requires python-docx
 ```
 
 Builds a formatted DOCX report from the latest run: KPI row, visibility
-matrix, article citations (when `ARTICLES` is set), engine comparison,
-auto-derived findings.
+matrix, measurement uncertainty (95% CI + methodology + provenance), article
+citations (when `ARTICLES` is set), engine comparison, auto-derived findings.
 
 ### Scheduled runs
 
@@ -195,7 +285,26 @@ The dashboard is one file — serve it with nginx or just `scp` it.
 | ChatGPT / Yandex Neuro | free by hand via manual mode, ~15 min/week |
 
 Models are overridable via `GEMINI_MODEL`, `PERPLEXITY_MODEL`,
-`OPENAI_MODEL` in `.env`.
+`OPENAI_MODEL` in `.env`. Each row records the model the API reports having
+served the answer, so drift behind a moving alias (e.g. `gemini-flash-latest`)
+is visible in the history instead of silently changing the numbers. `--samples N` multiplies API spend by N — smoke-test with `--limit`
+first.
+
+## Tests
+
+```bash
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install pytest
+.venv/bin/python -m pytest tests/ -q
+```
+
+Tests run on synthetic rows and mocked engine calls — no API keys, no quota,
+no network. The `queries` config is faked and all file paths are redirected
+to a temp dir, so your real `results.csv` / `answers.jsonl` are never touched.
+Coverage: interval known-answer/edge cases and reproducibility, provenance
+columns and receipts, the schema guard (old/reordered headers), geo payload
+handling per engine, sampling/quota/resume in `run`, and the console/HTML/DOCX
+reports end-to-end.
 
 ## Roadmap
 
