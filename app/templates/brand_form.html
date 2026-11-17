@@ -51,7 +51,7 @@
     <label>Articles JSON (optional)
       <textarea name="articles" rows="3" placeholder='{"key": {"title": "...", "url": "https://..."}}'>{{ values.articles }}</textarea></label>
     <label>Brand aliases JSON (optional)
-      <textarea name="aliases" rows="3" placeholder='{"example.com": ["Example Brand"]}'>{{ values.aliases }}</textarea></label>
+      <textarea name="aliases" rows="3" placeholder='{"example.com": ["Example Brand", "Бренд*"]}'>{{ values.aliases }}</textarea></label>
   </div>
   <button class="btn primary" type="submit">{{ "Save changes" if brand else "Create brand" }}</button>
 </form>

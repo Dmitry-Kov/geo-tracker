@@ -83,9 +83,42 @@ def test_text_subdomain_counts_like_url():
 
 
 def test_title_subdomain_counts_as_src():
+    # Gemini: the title IS the source host
     hits = gt.match_domains("no domains here", [], ["shop.brand.io"],
-                            domains=["brand.io"], aliases={})
+                            domains=["brand.io"], aliases={}, titles_are_hosts=True)
     assert hits["brand.io"]["src"] == 1
+
+
+def test_page_title_of_another_site_is_not_a_citation(paths):
+    # Perplexity / OpenAI return real URLs plus the cited page's headline.
+    # A review of brand.io on techsite.com is techsite.com being cited.
+    answer = {"text": "see the review", "model": "m",
+              "urls": ["https://techsite.com/review"],
+              "titles": ["Brand.io review: worth it?"]}
+    for engine in ("perplexity", "openai"):
+        row = gt.make_row(engine, "n1", "q1", answer=dict(answer),
+                          domains=["brand.io", "techsite.com"], articles={})
+        assert row["src_brand.io"] == 0, engine
+        assert row["src_techsite.com"] == 1, engine
+    # their own URL still counts, whatever the title says
+    own = {**answer, "urls": ["https://shop.brand.io/pricing"], "titles": ["Pricing"]}
+    row = gt.make_row("openai", "n1", "q1", answer=own,
+                      domains=["brand.io"], articles={})
+    assert row["src_brand.io"] == 1
+
+
+def test_gemini_host_title_still_decides_src(paths):
+    answer = {"text": "t", "model": "m", "urls": ["https://redirect.example/abc"],
+              "titles": ["shop.brand.io"]}
+    row = gt.make_row("gemini", "n1", "q1", answer=answer,
+                      domains=["brand.io"], articles={})
+    assert row["src_brand.io"] == 1
+    assert set(gt.HOST_TITLE_ENGINES) <= set(gt.ENGINES)
+
+
+def test_titles_do_not_count_unless_the_caller_says_they_are_hosts():
+    hits = gt.match_domains("", [], ["brand.io"], domains=["brand.io"], aliases={})
+    assert hits["brand.io"]["src"] == 0   # safe default
 
 
 def test_text_dot_continuation_rejected():
@@ -128,6 +161,31 @@ def test_multiword_alias_boundaries():
     hits = gt.match_domains("example brandnew world", [], [],
                             domains=["brand.io"], aliases=aliases)
     assert hits["brand.io"]["txt"] == 0
+
+
+def test_alias_with_star_matches_inflected_forms():
+    aliases = {"brand.io": ["Бренд*"]}
+    for text in ("по данным Бренд", "по данным Бренда", "в Бренде есть", "БРЕНДОМ назвали"):
+        hits = gt.match_domains(text, [], [], domains=["brand.io"], aliases=aliases)
+        assert hits["brand.io"]["txt"] == 1, text
+    # still anchored at the start of a word
+    hits = gt.match_domains("это суббренд компании", [], [],
+                            domains=["brand.io"], aliases=aliases)
+    assert hits["brand.io"]["txt"] == 0
+
+
+def test_alias_without_star_is_the_exact_word():
+    aliases = {"brand.io": ["Бренд"]}
+    assert gt.match_domains("по данным Бренд", [], [], domains=["brand.io"],
+                            aliases=aliases)["brand.io"]["txt"] == 1
+    assert gt.match_domains("по данным Бренда", [], [], domains=["brand.io"],
+                            aliases=aliases)["brand.io"]["txt"] == 0
+
+
+def test_empty_alias_never_matches():
+    for alias in ("", "  ", "*", " * "):
+        for text in ("anything, at all.", "", "word"):
+            assert not gt.alias_in_text(alias, text), (alias, text)
 
 
 def test_match_rules_version_is_v2():

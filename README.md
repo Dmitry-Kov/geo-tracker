@@ -137,15 +137,25 @@ source-title matching (rules v2) uses the same host semantics:
 `shop.brand.io` counts as `brand.io`; `1pc.uz` and `my-brand.io` don't;
 `brand.io.evil.com` doesn't (a dot followed by more name is a longer
 host), while a sentence-final dot ("Go to brand.io.") does count;
-`https://brand.io/pricing` inside text counts. Brand aliases match on
-word boundaries, case-insensitive ("Apex" hits "try Apex today", not
-"apexcharts").
+`https://brand.io/pricing` inside text counts.
+
+Source titles decide `src` **only for Gemini**, where the title is the
+source's host name (the real URL is hidden behind a redirect). For
+Perplexity and OpenAI the real URLs decide: a third-party page titled
+"Brand.io review" is that site being cited, not `brand.io`.
+
+Brand aliases match whole words, case-insensitive ("Apex" hits "try Apex
+today", not "apexcharts"). For languages that inflect names, end the alias
+with `*` to match the start of a word: `"Бренд*"` also hits "Бренда" and
+"в Бренде". Without the `*` only the exact form counts. Pick a stem
+distinctive enough not to open unrelated words.
 
 **Matching rules version.** `MATCH_RULES_VERSION` (currently **2**) is
 snapshotted into every service run's `Run.config`. v1 → v2 (2026-11-17):
 subdomains now count in text and source titles, a dot followed by a name
-continuation no longer counts, and aliases moved from substring to
-word-boundary matching. The rules change the numbers, so runs measured
+continuation no longer counts, aliases moved from substring to whole-word
+matching (with an explicit `*` for word starts), and page titles stopped
+counting as sources for Perplexity and OpenAI. The rules change the numbers, so runs measured
 under different versions are not directly comparable; service snapshots
 taken before v2 lack the key and read as version 1.
 
