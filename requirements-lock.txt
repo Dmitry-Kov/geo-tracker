@@ -1,0 +1,57 @@
+# Exact dependency closure — CI and reproducible dev installs use THIS file,
+# so Python 3.9 and 3.12 jobs run identical versions (a loose resolve once
+# gave CI SQLAlchemy 2.1 while local had 2.0, hiding a real bug).
+# Generated in a clean Python 3.9 venv; verified installable and test-green
+# on Python 3.9 AND 3.12.
+# Refresh: in a clean venv run
+#   pip install -r requirements.txt pytest httpx && pip freeze
+# keep the greenlet line (see below), then run the tests on both Python
+# versions and commit this file together
+# with any requirements.txt bound changes.
+alembic==1.16.5
+annotated-doc==0.0.5
+annotated-types==0.7.0
+anyio==4.12.1
+APScheduler==3.11.3
+certifi==2026.10.23
+charset-normalizer==3.5.2
+click==8.1.8
+exceptiongroup==1.3.1
+fastapi==0.128.8
+# greenlet: SQLAlchemy requires it on Linux x86_64/aarch64 but not on macOS
+# arm64, so a freeze taken on a Mac omits it and CI then resolved it loosely
+# (3.2.5 on Python 3.9, 3.5.6 on 3.12). Pinned by hand; nothing imports it.
+greenlet==3.2.5
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.9.0
+httpx==0.28.1
+idna==3.20
+iniconfig==2.1.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+lxml==6.1.3
+Mako==1.3.12
+MarkupSafe==3.0.4
+packaging==26.3
+pluggy==1.6.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==8.4.2
+python-docx==1.2.0
+python-dotenv==1.2.1
+python-multipart==0.0.20
+PyYAML==6.0.3
+requests==2.32.5
+SQLAlchemy==2.0.58
+starlette==0.49.3
+tomli==2.5.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+tzlocal==5.3.1
+urllib3==2.6.3
+uvicorn==0.39.0
+uvloop==0.23.0
+watchfiles==1.1.1
+websockets==15.0.1

@@ -333,10 +333,20 @@ first.
 ## Tests
 
 ```bash
-python3 -m venv --system-site-packages .venv
+python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -q
 ```
+
+**Dependency versions.** `requirements.txt` carries upper bounds (a loose
+resolve once gave CI SQLAlchemy 2.1 while local had 2.0, hiding a real
+bug). `requirements-lock.txt` pins the exact closure — CI and
+`requirements-dev.txt` install from it, so Python 3.9 and 3.12 run
+identical versions. Create the venv without `--system-site-packages`:
+with it, packages already installed outside the venv are used instead of the
+pinned ones. To upgrade: bump the bounds, regenerate the lock in a
+clean venv (instruction inside the file), run the tests on both versions,
+commit both files together.
 
 Tests run on synthetic rows and mocked engine calls — no API keys, no quota,
 no network. The `queries` config is faked and all file paths are redirected
@@ -355,7 +365,7 @@ unchanged alongside it (its history stays in `results.csv`; the service has
 its own SQLite history).
 
 ```bash
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-lock.txt
 .venv/bin/uvicorn app.main:app
 # open http://127.0.0.1:8000
 ```
