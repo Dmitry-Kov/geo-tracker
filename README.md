@@ -146,6 +146,18 @@ record the geo with `geo_applied=0`. `model` is the model the API reports
 having served the answer (Gemini `modelVersion`, OpenAI/Perplexity `model`),
 falling back to the requested name; the receipt also keeps `model_requested`.
 
+**Resource usage (COGS evidence).** Each receipt archives the API's own usage
+report as-is: tokens (Gemini `usageMetadata`, OpenAI/Perplexity `usage`), the
+number of executed searches (Gemini `webSearchQueries`; OpenAI
+`web_search_call` actions of type `search` — `open_page`/`find_in_page` are
+browsing, not searches; Sonar reports no count → `null`), and — for
+Perplexity — the actual billed cost (`usage.cost.total_cost`). `report`
+prints a per-engine summary for the latest run. No price tables or guesses:
+only what the APIs themselves reported; older receipts without usage show
+`—`, not fabricated zeros. The summary is a **lower bound**: only successful
+answers are counted — failed calls and HTTP retries never reach a receipt
+and are excluded.
+
 **Measurement uncertainty.** A single "17% mention share" is false precision.
 Alongside the point matrix, the reports show the share with a **95%
 confidence interval whose unit of evidence is the query, not the answer** —
@@ -223,7 +235,9 @@ python geo_tracker.py report [--out PATH]
 Prints the share-of-voice matrix and domain leaderboard for the latest run,
 plus a **measurement-uncertainty** table (95% CI per
 niche × domain, with `nq`/`n`, methodology and provenance: models used,
-requested geo and which engines applied it), and writes `dashboard.html` —
+requested geo and which engines applied it) and a **resource-usage** summary
+per engine (calls, tokens, executed searches, API-reported cost — from the
+raw receipts), and writes `dashboard.html` —
 a single self-contained file (Chart.js loads from a CDN, so opening it needs
 internet) with the same audit section.
 

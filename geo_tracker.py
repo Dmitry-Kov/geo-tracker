@@ -293,7 +293,9 @@ def ask_gemini(query: str, geo: str = "") -> dict:
         if web.get("title"):
             titles.append(web["title"])
     return {"text": text, "urls": urls, "titles": titles,
-            "model": data.get("modelVersion") or model, "model_requested": model}
+            "model": data.get("modelVersion") or model, "model_requested": model,
+            "usage": data.get("usageMetadata") or {},
+            "searches": len(gm.get("webSearchQueries") or [])}
 
 
 def ask_perplexity(query: str, geo: str = "") -> dict:
@@ -301,6 +303,8 @@ def ask_perplexity(query: str, geo: str = "") -> dict:
 
     A requested geo IS applied here: Sonar takes
     web_search_options.user_location.country (ISO alpha-2, country-level).
+    Usage is archived as reported — Sonar includes the actual cost
+    (usage.cost.total_cost) but no search count, so searches stays None.
     """
     model = os.environ.get("PERPLEXITY_MODEL", "sonar")
     payload = {
@@ -324,7 +328,8 @@ def ask_perplexity(query: str, geo: str = "") -> dict:
         if sr.get("title"):
             titles.append(sr["title"])
     return {"text": text, "urls": urls, "titles": titles,
-            "model": data.get("model") or model, "model_requested": model}
+            "model": data.get("model") or model, "model_requested": model,
+            "usage": data.get("usage") or {}, "searches": None}
 
 
 def ask_openai(query: str, geo: str = "") -> dict:
@@ -362,8 +367,13 @@ def ask_openai(query: str, geo: str = "") -> dict:
                             urls.append(ann["url"])
                         if ann.get("title"):
                             titles.append(ann["title"])
+    # open_page / find_in_page actions are browsing, not searches (verified live)
+    searches = sum(1 for item in data.get("output") or []
+                   if item.get("type") == "web_search_call"
+                   and (item.get("action") or {}).get("type") == "search")
     return {"text": " ".join(text_parts), "urls": urls, "titles": titles,
-            "model": data.get("model") or model, "model_requested": model}
+            "model": data.get("model") or model, "model_requested": model,
+            "usage": data.get("usage") or {}, "searches": searches}
 
 
 ENGINES = {
@@ -738,6 +748,51 @@ def cmd_report(args) -> None:
         print(f"Provenance (latest run): requested geo — {', '.join(geos)} ({note})")
     if models or geos:
         print()
+
+    engine_by_id = {r["row_id"]: r["engine"] for r in latest_ok}
+    usage_agg = {}
+    if ANSWERS_JSONL.exists():
+        with ANSWERS_JSONL.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                eng = engine_by_id.get(rec.get("row_id"))
+                if not eng:
+                    continue
+                a = usage_agg.setdefault(eng, {"calls": 0, "usage_receipts": 0,
+                                               "tokens": 0, "tokens_known": False,
+                                               "searches": 0, "searches_known": False,
+                                               "cost": 0.0, "cost_known": False})
+                a["calls"] += 1
+                u = rec.get("usage") or {}
+                if u:
+                    a["usage_receipts"] += 1
+                t = u.get("totalTokenCount", u.get("total_tokens"))
+                if isinstance(t, (int, float)):
+                    a["tokens"] += t
+                    a["tokens_known"] = True
+                s = rec.get("searches")
+                if isinstance(s, int):
+                    a["searches"] += s
+                    a["searches_known"] = True
+                c = (u.get("cost") or {}).get("total_cost")
+                if isinstance(c, (int, float)):
+                    a["cost"] += c
+                    a["cost_known"] = True
+    if usage_agg:
+        print("=== Resource usage (latest run, from receipts) ===")
+        for eng in sorted(usage_agg):
+            a = usage_agg[eng]
+            tokens = str(a["tokens"]) if a["tokens_known"] else "—"
+            searches = str(a["searches"]) if a["searches_known"] else "—"
+            cost = f"${a['cost']:.4f}" if a["cost_known"] else "—"
+            print(f"  {eng:<11} calls={a['calls']:<3} usage={a['usage_receipts']}/{a['calls']:<3} "
+                  f"tokens={tokens:<8} searches={searches:<4} cost={cost}")
+        print("  Tokens/searches/cost summed over receipts WITH usage only (usage=X/Y); "
+              "raw API counters, cost only where the API reported it (Perplexity). "
+              "Lower bound: successful answers only — failed calls and retries excluded.\n")
 
     print("=== Domain leaderboard (latest run, GROUNDED only, % of grounded queries) ===")
     subset = [r for r in latest_ok if is_grounded(r)]

@@ -15,7 +15,8 @@ import pytest
 import geo_tracker as gt
 
 ANSWER = {"text": "example.com is great", "urls": ["https://example.com/a"],
-          "titles": ["example.com"], "model": "gem-test"}
+          "titles": ["example.com"], "model": "gem-test",
+          "usage": {"totalTokenCount": 100}, "searches": 1}
 
 
 @pytest.fixture
@@ -115,6 +116,8 @@ def test_make_row_records_provenance_and_enriches_receipt(paths):
     assert receipt["model"] == "gem-test"
     assert receipt["geo"] == "UZ" and receipt["sample"] == 2
     assert receipt["text"] == ANSWER["text"]  # raw answer preserved
+    assert receipt["usage"] == {"totalTokenCount": 100}  # COGS evidence archived
+    assert receipt["searches"] == 1
 
 
 def test_make_row_defaults_without_answer(paths):
@@ -239,6 +242,90 @@ def test_perplexity_applies_geo_via_user_location(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Usage archival: raw API counters (and Perplexity's reported cost) in receipts
+# ---------------------------------------------------------------------------
+
+def test_gemini_archives_usage_and_search_count(monkeypatch):
+    def fake_post(url, *, headers, payload):
+        return {"candidates": [{"content": {"parts": [{"text": "t"}]},
+                                "groundingMetadata": {
+                                    "groundingChunks": [],
+                                    "webSearchQueries": ["q one", "q two"]}}],
+                "usageMetadata": {"promptTokenCount": 4, "totalTokenCount": 100}}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    answer = gt.ask_gemini("q")
+    assert answer["usage"]["totalTokenCount"] == 100
+    assert answer["searches"] == 2  # executed searches = billing unit on Gemini 3+
+
+
+def test_gemini_zero_searches_is_known_zero(monkeypatch):
+    def fake_post(url, *, headers, payload):
+        return {"candidates": [{"content": {"parts": [{"text": "t"}]}}],
+                "usageMetadata": {"totalTokenCount": 50}}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    answer = gt.ask_gemini("q")
+    assert answer["searches"] == 0  # model skipped search — observed zero, not unknown
+    assert answer["usage"]["totalTokenCount"] == 50
+
+
+def test_openai_archives_usage_and_search_count(monkeypatch):
+    def fake_post(url, *, headers, payload):
+        return {"output": [{"type": "web_search_call",
+                            "action": {"type": "search", "query": "a"}},
+                           {"type": "reasoning"},
+                           {"type": "web_search_call",
+                            "action": {"type": "search", "query": "b"}},
+                           {"type": "message", "content": [
+                               {"type": "output_text", "text": "hi",
+                                "annotations": []}]}],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    answer = gt.ask_openai("q")
+    assert answer["searches"] == 2
+    assert answer["usage"]["total_tokens"] == 15
+
+
+def test_openai_counts_only_search_actions(monkeypatch):
+    # Live probe 2026-11-17: web_search_call items carry action.type
+    # search / open_page / find_in_page — only search is a search.
+    def fake_post(url, *, headers, payload):
+        return {"output": [
+            {"type": "web_search_call", "action": {"type": "search", "query": "a"}},
+            {"type": "web_search_call", "action": {"type": "open_page",
+                                                   "url": "https://example.com"}},
+            {"type": "web_search_call", "action": {"type": "find_in_page",
+                                                   "url": "https://example.com"}},
+            {"type": "web_search_call"},  # no action → not counted as a search
+            {"type": "message", "content": [
+                {"type": "output_text", "text": "hi", "annotations": []}]}]}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    answer = gt.ask_openai("q")
+    assert answer["searches"] == 1
+
+
+def test_perplexity_archives_usage_with_reported_cost(monkeypatch):
+    def fake_post(url, *, headers, payload):
+        return {"choices": [{"message": {"content": "t"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 563,
+                          "total_tokens": 575,
+                          "cost": {"total_cost": 0.00526}}}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+    answer = gt.ask_perplexity("q")
+    assert answer["usage"]["cost"]["total_cost"] == 0.00526  # API-reported, not guessed
+    assert answer["searches"] is None  # Sonar reports no search count
+
+
+# ---------------------------------------------------------------------------
 # cmd_run: sampling, geo propagation, quota, resume
 # ---------------------------------------------------------------------------
 
@@ -359,9 +446,23 @@ def test_cmd_report_audit_section(paths, capsys):
     assert f"B={gt.DEFAULT_B}, seed={gt.DEFAULT_SEED}" in out
     assert "Provenance (latest run): models — gem-test" in out
     assert "requested geo — UZ (recorded only" in out
+    assert "Resource usage (latest run, from receipts)" in out
+    assert "calls=5" in out and "tokens=500" in out  # 5 receipts × 100 tokens
+    assert "usage=5/5" in out
     dashboard = gt.DASHBOARD_HTML.read_text(encoding="utf-8")
     assert "Measurement uncertainty" in dashboard
     assert '"audit"' in dashboard and '"audit_meta"' in dashboard
+
+
+def test_resource_usage_unknown_for_old_receipts(paths, capsys):
+    old = {k: v for k, v in ANSWER.items() if k not in ("usage", "searches")}
+    gt.append_row(gt.make_row("gemini", "n1", "q1", answer=old))
+    gt.cmd_report(argparse.Namespace(out=None))
+    out = capsys.readouterr().out
+    assert "Resource usage" in out
+    # pre-usage receipts: unknown, not fabricated zeros
+    assert "tokens=—" in out and "searches=—" in out and "cost=—" in out
+    assert "usage=0/1" in out
 
 
 def test_dashboard_snapshot_semantics_unchanged(paths):
