@@ -46,6 +46,10 @@ tr:last-child td { border-bottom: none; }
 .badge.running, .badge.pending, .badge.queued { background: var(--run-soft); color: var(--run); }
 .badge.error { background: var(--err-soft); color: var(--err); }
 .badge.cancelled { background: #f3f4f6; color: #6b7280; }
+.badge.sig { background: var(--acc-soft); color: var(--acc); }
+.badge.noise { background: #f3f4f6; color: #6b7280; }
+.badge.insuff { background: var(--run-soft); color: var(--run); }
+.banner.warn { background: var(--run-soft); color: #92400e; }
 .btn { display: inline-block; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--card); color: var(--ink); font-size: 13.5px; text-decoration: none; cursor: pointer; }
 .btn:hover { border-color: var(--muted); }

@@ -400,6 +400,24 @@ the service does not need it.
 - **Results**: visibility matrix, the same audit-grade 95% CI (Wilson /
   cluster bootstrap), resource-usage summary; export the branded HTML
   dashboard or DOCX (en/ru) per run.
+- **Dynamics between runs**: the brand page shows a per niche × domain
+  history (table + Chart.js graph, vendored locally) over **done** runs,
+  each read from its own config snapshot. A run that is not comparable with
+  the one before it — the matching rules, the geo or the domain's aliases
+  changed — is flagged in the table and reached by a dashed segment on the
+  chart: that step is a change of measurement, not of visibility. A comparison of two done runs
+  pairs queries at the query × engine level on the grounded channel and
+  reports, per pair, whether the change is **significant** or **within
+  noise**: a seeded sign-flip permutation test (B=10000, seed=0, α=0.05)
+  with **Holm correction** across the family of niche rows + per-domain
+  overall rows. The displayed Δ is the mean paired difference (the tested
+  quantity), not the difference of pooled shares. Fewer than 30 common
+  queries → «insufficient queries», no number. Hard gates: only `done`
+  runs; different `match_rules_version` or `geo` → the pair is not
+  compared; different aliases → that domain is not compared; different
+  served models → a «was → became» warning. Both runs' grounded fractions
+  are shown so a drop in searching is visible. Method:
+  `docs/comparison-method.md`.
 - **Auth**: set `APP_PASSWORD` in `.env` to require login (session cookie);
   unset = local mode without auth, which answers on `localhost` /
   `127.0.0.1` only. To serve another host name set `APP_ALLOWED_HOSTS`

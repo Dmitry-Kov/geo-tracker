@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Compare · {{ brand.name }} · geo-tracker{% endblock %}
+{% block content %}
+<div class="head-row">
+  <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ compare</span></h1>
+  <a class="btn" href="/brands/{{ brand.id }}">Back to brand</a>
+</div>
+
+<div class="card">
+<form method="get" action="/brands/{{ brand.id }}/compare" class="row-actions">
+  <label>Run A
+    <select name="a">{% for r in done_list %}<option value="{{ r.id }}" {{ 'selected' if r.id == a }}>{{ r.label }}</option>{% endfor %}</select></label>
+  <label>Run B
+    <select name="b">{% for r in done_list %}<option value="{{ r.id }}" {{ 'selected' if r.id == b }}>{{ r.label }}</option>{% endfor %}</select></label>
+  <button class="btn primary" type="submit">Compare</button>
+</form>
+<p class="small muted">Only done runs are listed; cancelled, error and queued runs are excluded.</p>
+</div>
+
+{% if error %}<div class="banner err">{{ error }}</div>{% endif %}
+
+{% if result %}
+  {% if not result.comparable %}
+  <div class="banner err">
+    <strong>These runs are not comparable.</strong>
+    <ul>
+      {% if 'not_done' in result.reasons %}<li>Only done runs can be compared.</li>{% endif %}
+      {% if 'rules_version' in result.reasons %}<li>Different matching-rules versions: v{{ result.rules_a }} ≠ v{{ result.rules_b }}. Runs under different rules are never compared.</li>{% endif %}
+      {% if 'geo' in result.reasons %}<li>Different geo: A={{ result.geo_a or "—" }} , B={{ result.geo_b or "—" }}. A run pair with different geo is not comparable.</li>{% endif %}
+    </ul>
+  </div>
+  {% else %}
+
+  <p class="mono small muted">{{ label_a }} &nbsp;vs&nbsp; {{ label_b }} · rules v{{ result.rules_a }} · geo {{ result.geo_a or "—" }}</p>
+
+  {% if result.niches_only_a or result.niches_only_b %}
+  <p class="small muted">Niches present in only one of the runs are not compared:
+    {% if result.niches_only_a %}only in A — {{ result.niches_only_a|join(", ") }}{% endif %}
+    {% if result.niches_only_b %}only in B — {{ result.niches_only_b|join(", ") }}{% endif %}</p>
+  {% endif %}
+
+  {% if result.models_warning %}
+  <div class="banner warn">
+    <strong>Model drift warning</strong> — served models differ between the runs:
+    <ul>{% for w in result.models_warning %}
+      <li class="mono small">{{ w.engine }}: {{ w.was|join(", ") or "—" }} → {{ w.became|join(", ") or "—" }}</li>
+    {% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <h2>Grounded fraction (answers with sources)</h2>
+  <div class="card">
+  <table class="small">
+    <tr><th>Engine</th><th>Run A</th><th>Run B</th></tr>
+    <tr><td class="mono">overall</td>
+      <td class="mono">{% if result.grounded.a.overall %}{{ (100*result.grounded.a.overall.fraction)|round(1) }}% ({{ result.grounded.a.overall.grounded }}/{{ result.grounded.a.overall.ok }}){% else %}—{% endif %}</td>
+      <td class="mono">{% if result.grounded.b.overall %}{{ (100*result.grounded.b.overall.fraction)|round(1) }}% ({{ result.grounded.b.overall.grounded }}/{{ result.grounded.b.overall.ok }}){% else %}—{% endif %}</td></tr>
+    {% for e in (result.grounded.a.by_engine.keys()|list + result.grounded.b.by_engine.keys()|list)|unique %}
+    <tr><td class="mono">{{ e }}</td>
+      <td class="mono">{% set ga = result.grounded.a.by_engine.get(e) %}{% if ga %}{{ (100*ga.fraction)|round(1) }}%{% else %}—{% endif %}</td>
+      <td class="mono">{% set gb = result.grounded.b.by_engine.get(e) %}{% if gb %}{{ (100*gb.fraction)|round(1) }}%{% else %}—{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+  <p class="small muted">If an engine searches less often, its grounded fraction drops here — visible next to the comparison.</p>
+  </div>
+
+  <h2>Change per niche × domain</h2>
+  <div class="card">
+  <table class="small">
+    <tr><th>Domain / niche</th><th>Verdict</th><th>Δ (pp)</th><th>raw p</th><th>adj p</th><th>n common</th><th>disc.</th><th>ref A → B</th></tr>
+    {% for domain, rows in result.pairs|groupby('domain') %}
+      {% for p in rows %}
+      <tr>
+        <td class="mono">{{ domain }}<br><span class="muted small">{% if p.niche %}{{ p.niche }}{% elif p.overall %}all niches{% else %}domain gate{% endif %}</span></td>
+        {% if p.verdict == 'significant' %}
+          <td><span class="badge sig">significant ({{ p.direction }})</span></td>
+          <td class="mono">{{ p.delta_pp }}</td>
+          <td class="mono">{{ '<0.001' if p.raw_p < 0.001 else '%.3f'|format(p.raw_p) }}</td>
+          <td class="mono">{{ '<0.001' if p.adj_p < 0.001 else '%.3f'|format(p.adj_p) }}</td>
+          <td class="mono">{{ p.n_common }}</td>
+          <td class="mono">{{ p.discordant }}</td>
+          <td class="mono small">{{ (100*p.pooled_a)|round(1) }}% → {{ (100*p.pooled_b)|round(1) }}%</td>
+        {% elif p.verdict == 'noise' %}
+          <td><span class="badge noise">within noise</span></td>
+          <td class="mono">{{ p.delta_pp }}</td>
+          <td class="mono">{{ '<0.001' if p.raw_p < 0.001 else '%.3f'|format(p.raw_p) }}</td>
+          <td class="mono">{{ '<0.001' if p.adj_p < 0.001 else '%.3f'|format(p.adj_p) }}</td>
+          <td class="mono">{{ p.n_common }}</td>
+          <td class="mono">{{ p.discordant }}</td>
+          <td class="mono small">{{ (100*p.pooled_a)|round(1) }}% → {{ (100*p.pooled_b)|round(1) }}%</td>
+        {% elif p.verdict == 'insufficient' %}
+          <td><span class="badge insuff">insufficient queries</span></td>
+          <td class="mono" colspan="6">n common = {{ p.n_common }} (&lt; {{ result.min_common }}); only A: {{ p.only_a }}, only B: {{ p.only_b }}{% if p.no_common_engine %}, no common engine: {{ p.no_common_engine }}{% endif %} — no number</td>
+        {% elif p.verdict == 'aliases_differ' %}
+          <td><span class="badge insuff">domain not comparable</span></td>
+          <td class="mono small" colspan="6">different aliases: A={{ p.aliases_a|join(", ") or "—" }} , B={{ p.aliases_b|join(", ") or "—" }}</td>
+        {% elif p.verdict == 'absent' %}
+          <td><span class="badge insuff">absent</span></td>
+          <td class="mono small" colspan="6">domain is not in both runs' snapshots</td>
+        {% else %}
+          <td><span class="badge noise">{{ p.verdict }}</span></td>
+          <td class="mono" colspan="6">—</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    {% endfor %}
+  </table>
+  </div>
+
+  <div class="card small muted">
+    <strong>Method.</strong> Grounded channel only. Paired by query × engine: a query is common
+    only if some engine has ok grounded answers for it in both runs; its rate pools exactly those
+    common engines. <strong>Δ shown is the mean over common queries of the per-query rate difference</strong>
+    (the tested quantity); the «ref A → B» column is the pooled subset share, shown as reference only —
+    its difference is not the change and can differ in sign. Significance: seeded paired sign-flip
+    permutation test (B={{ result.B }}, seed={{ result.seed }}, α={{ result.alpha }}), with
+    <strong>Holm correction across the family of {{ result.family_size }} pairs</strong> (niche rows +
+    per-domain overall rows); «significant» uses the adjusted p. Fewer than {{ result.min_common }}
+    common queries → «insufficient queries», no number.
+    <br><br>
+    <strong>Sensitivity.</strong> «Within noise» means «not detected», not «no change». For a share rise
+    20% → 40%, the change is detected in ≈34% of comparisons at 30 common queries, ≈71% at 60, ≈96% at 120
+    (approved reference; actual power depends on samples per query and the hit-rate distribution).
+    Every «within noise» row above carries its common-query count for this reason.
+  </div>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -143,6 +143,16 @@ pass.
   otherwise. More samples per query must not narrow the interval.
   (`test_all_misses_is_not_reported_as_certainty`,
   `test_more_samples_per_query_do_not_narrow_the_interval`)
+- **Runs are compared only on equal footing.** `dynamics.compare()` refuses
+  runs that are not `done` or differ in matching-rules version or geo, and a
+  domain whose aliases differ; verdicts use the Holm-adjusted p across all
+  pairs of one comparison; the change shown is the tested quantity. The
+  history marks the same breaks (`basis_change()`) instead of drawing them
+  as a trend. (`test_fwer_no_change_18_pairs_at_most_5_percent`,
+  `test_history_marks_runs_not_comparable_with_the_previous_one`)
+- **Permutation counts are exact.** `paired_pvalue()` sums integers on a
+  common denominator. Floats lose ties and make p too small.
+  (`test_pvalue_counts_ties_exactly`)
 - **The CSV schema guard stays.** `check_results_schema()` refuses to append
   to a `results.csv` with other columns. (`test_schema_guard_rejects_old_header`)
 
@@ -160,6 +170,8 @@ Found only by running the real thing. Check these classes of change by hand.
 | A third-party page title counted as the brand being cited | hand-made examples |
 | Export of a cancelled run looked like a full report | exporting one by hand |
 | A scheduled tick waiting for its turn could not be seen or stopped | driving the scheduler by hand |
+| p-values too small because float sums lost ties | comparing with exact arithmetic |
+| History drew an added alias as growth from 0% to 100% | seeding runs with a config change |
 | Geo was documented as unsupported by an API that supports it | reading the API docs |
 
 ## Known gaps
