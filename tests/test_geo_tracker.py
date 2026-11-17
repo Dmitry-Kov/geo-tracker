@@ -362,6 +362,37 @@ def test_perplexity_applies_geo_via_user_location(monkeypatch):
     assert set(captured["payload"]) == {"model", "messages"}  # no geo → untouched
 
 
+def test_perplexity_deduplicates_overlapping_sources(paths, monkeypatch):
+    # citations and search_results repeat the same pages: each source counts
+    # once (first-seen order), or n_sources and receipts inflate.
+    def fake_post(url, *, headers, payload):
+        return {"model": "sonar-served",
+                "choices": [{"message": {"content": "t"}}],
+                "citations": ["https://example.com/a", "", "https://test.org/b",
+                              "https://example.com/a"],
+                "search_results": [
+                    {"url": "https://example.com/a", "title": "Example A"},
+                    {"url": "https://other.net/c", "title": "Other C"},
+                    {"url": "https://test.org/b", "title": "Test B"},
+                    {"url": "", "title": "No URL"},
+                ]}
+
+    monkeypatch.setattr(gt, "_post_with_retries", fake_post)
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+
+    answer = gt.ask_perplexity("q")
+    assert answer["urls"] == ["https://example.com/a", "https://test.org/b",
+                              "https://other.net/c"]  # no repeats, no empties
+    assert answer["titles"] == ["Example A", "Other C", "Test B", "No URL"]
+
+    row = gt.make_row("perplexity", "n1", "q1", answer=answer,
+                      domains=["example.com", "test.org"], articles={})
+    assert row["n_sources"] == 3
+    assert row["src_example.com"] == 1 and row["src_test.org"] == 1
+    receipt = json.loads(gt.ANSWERS_JSONL.read_text(encoding="utf-8").strip())
+    assert receipt["urls"] == answer["urls"]  # no duplicate links archived
+
+
 # ---------------------------------------------------------------------------
 # Usage archival: raw API counters (and Perplexity's reported cost) in receipts
 # ---------------------------------------------------------------------------
@@ -597,6 +628,43 @@ def test_dashboard_snapshot_semantics_unchanged(paths):
     assert data["audit_meta"]["models"] == ["gem-test"]
     assert data["audit_meta"]["geo"] == ["UZ"]
     assert data["audit_meta"]["geo_applied_engines"] == []
+
+
+def test_dashboard_escapes_hostile_queries_and_titles(paths):
+    from report_html import build_dashboard
+    query = "best <script>alert(1)</script></script> tool"
+    answer = {"text": "t", "urls": ["https://example.com/a"],
+              "titles": ["example.com"], "model": "m"}
+    gt.append_row(gt.make_row("gemini", "n1", query, answer=answer))
+    articles = {"a1": {"title": "<img onerror=alert(1)>",
+                       "url": "https://example.com/page"}}
+    out = paths / "dashboard.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out, articles=articles)
+    html = out.read_text(encoding="utf-8")
+
+    # The inline JSON must not close the <script> tag early: "</" is written
+    # "<\/", which the JSON/JS parser still reads as "/".
+    start = html.index("const D = ") + len("const D = ")
+    end = html.index(";\n", start)
+    blob = html[start:end]
+    assert "</" not in blob
+    assert "<\\/script>" in blob
+    data = json.loads(blob)  # the escape round-trips to the original data
+    assert data["current_hits"][0]["query"] == query
+    assert data["articles"][0]["title"] == "<img onerror=alert(1)>"
+
+    # Outside the JSON blob no raw payload may appear as markup, and only the
+    # two real <script> tags (CDN + inline) may be closed.
+    markup = html[:start] + html[end:]
+    assert "<script>alert(1)" not in markup
+    assert "<img onerror" not in markup
+    assert html.count("</script>") == 2
+
+    # Data strings reach innerHTML only through the esc() helper.
+    for frag in ("esc(v)", "esc(l)", "esc(d)", "esc(info.title)", "esc(e)",
+                 "esc(a.title)", "esc(a.url)", "esc(q.engine)", "esc(q.query)",
+                 "esc(h.engine)", "esc(h.query)"):
+        assert frag in html
 
 
 def test_build_docx_both_langs(paths, monkeypatch):

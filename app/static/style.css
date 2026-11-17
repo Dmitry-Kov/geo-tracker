@@ -63,10 +63,13 @@ tr:last-child td { border-bottom: none; }
 .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 14px; }
 .banner.err { background: var(--err-soft); color: var(--err); }
 form label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
-input, textarea { display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
+input, textarea, select { display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
   border: 1px solid var(--line); border-radius: 8px; font: 14px var(--mono); color: var(--ink);
   background: var(--card); }
-input:focus, textarea:focus { outline: 2px solid var(--acc-soft); border-color: var(--acc); }
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--acc-soft); border-color: var(--acc); }
+/* inline Run A / Run B selectors sit next to the Compare button, not under a label block */
+.row-actions label { margin-bottom: 0; }
+.row-actions select { display: inline-block; width: auto; margin-top: 0; margin-left: 6px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
 fieldset.engines { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; padding: 8px 12px; }

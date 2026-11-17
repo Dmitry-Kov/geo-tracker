@@ -8,6 +8,7 @@ up as missing columns / zero hits.
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -17,11 +18,12 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 import geo_tracker as gt
 import app.runner as runner
 import app.scheduler as scheduler
-from app.db import Answer, Brand, Hit, Run
+from app.db import Answer, ArticleHit, Brand, Hit, Run, make_engine
 from app.main import create_app, request_guard_error
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -527,6 +529,74 @@ def test_local_mode_answers_on_loopback_names_only(tmp_path, env):
 
 
 # ---------------------------------------------------------------------------
+# /healthz: liveness + DB check without a session, loopback even behind
+# APP_ALLOWED_HOSTS (Docker's HEALTHCHECK addresses 127.0.0.1)
+# ---------------------------------------------------------------------------
+
+def test_healthz_answers_ok_in_local_mode(tmp_path, env):
+    application = create_app(db_path=tmp_path / "healthz_local.db")
+    for base in (LOCAL, "http://127.0.0.1:8000"):
+        with TestClient(application, base_url=base) as c:
+            r = c.get("/healthz")
+            assert r.status_code == 200, base
+            assert r.text == "ok"
+            assert r.headers["content-type"].startswith("text/plain")
+
+
+def test_healthz_with_password_and_allowed_hosts(tmp_path, env):
+    env.setenv("APP_PASSWORD", "test-password")
+    env.setenv("APP_ALLOWED_HOSTS", "geo.example.com")
+    application = create_app(db_path=tmp_path / "healthz_hosts.db")
+
+    # Public name, no session cookie: healthz answers, the pages still login.
+    with TestClient(application, base_url="https://geo.example.com") as c:
+        r = c.get("/healthz")
+        assert r.status_code == 200 and r.text == "ok"
+        assert c.get("/", follow_redirects=False).status_code == 307
+
+    # Docker healthcheck: loopback host although only the public name is
+    # allowed — while GET / on loopback stays refused (the list is exact).
+    with TestClient(application, base_url="http://127.0.0.1:8000") as c:
+        r = c.get("/healthz")
+        assert r.status_code == 200 and r.text == "ok"
+        assert c.head("/healthz").status_code == 200
+        assert c.get("/").status_code == 400
+        # The exception is read-only: POST /healthz is not exempt.
+        assert c.post("/healthz").status_code == 400
+
+    # Foreign hosts get no exception, not even on /healthz.
+    with TestClient(application, base_url="http://rebound.evil.example:8000") as c:
+        assert c.get("/healthz").status_code == 400
+
+    # The pure check behind the middleware: loopback GET/HEAD only.
+    assert request_guard_error("GET", {"host": "127.0.0.1:8000"}, "/healthz") is None
+    assert request_guard_error("HEAD", {"host": "[::1]:8000"}, "/healthz") is None
+    assert request_guard_error("POST", {"host": "127.0.0.1:8000"}, "/healthz") is not None
+    assert request_guard_error("GET", {"host": "127.0.0.1:8000"}, "/") is not None
+    assert request_guard_error("GET", {"host": "evil.example"}, "/healthz") is not None
+
+
+def test_healthz_fails_when_the_database_is_unreachable(tmp_path, env):
+    """The endpoint must execute a query, not just answer "ok": with the DB
+    broken it has to fail, or a healthcheck would pass on a dead database."""
+    from sqlalchemy import event
+    application = create_app(db_path=tmp_path / "healthz_db.db")
+    with TestClient(application, base_url=LOCAL,
+                    raise_server_exceptions=False) as c:
+        assert c.get("/healthz").status_code == 200
+        engine = application.state.Session.kw["bind"]
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def db_down(conn, cursor, statement, parameters, context, executemany):
+            raise RuntimeError("database is down")
+
+        try:
+            assert c.get("/healthz").status_code == 500
+        finally:
+            event.remove(engine, "before_cursor_execute", db_down)
+
+
+# ---------------------------------------------------------------------------
 # queries.py is CLI config: the service starts without it, the CLI says so
 # ---------------------------------------------------------------------------
 
@@ -665,3 +735,197 @@ def test_settings_from_dotenv_are_applied(tmp_path):
     assert "secure" in out["cookie"].lower()             # APP_HTTPS_ONLY
     assert out["secret"] == "secret-from-dotenv"         # APP_SECRET
     assert (tmp_path / "from_dotenv.db").exists()        # GEO_DB_PATH
+
+
+# ---------------------------------------------------------------------------
+# Pre-deploy hardening: SQLite pragmas, safe deletes, global active slot,
+# full error pages, snapshot niche titles
+# ---------------------------------------------------------------------------
+
+def test_sqlite_pragmas_on_every_connection(tmp_path):
+    """busy_timeout, foreign_keys and WAL are set on each new DBAPI
+    connection (pragmas are connection-local), and the FK pragma is
+    enforced, not merely reported."""
+    eng = make_engine(tmp_path / "pragmas.db")
+    try:
+        with eng.connect() as c1, eng.connect() as c2:  # two pool connections
+            for conn in (c1, c2):
+                assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+                assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+                assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        with eng.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+            conn.exec_driver_sql(
+                "CREATE TABLE child (id INTEGER PRIMARY KEY,"
+                " parent_id INTEGER REFERENCES parent(id))")
+        with pytest.raises(IntegrityError):             # orphan insert refused
+            with eng.begin() as conn:
+                conn.exec_driver_sql("INSERT INTO child (parent_id) VALUES (999)")
+    finally:
+        eng.dispose()
+
+
+def test_delete_finished_brand_with_all_children_leaves_no_orphans(client):
+    # non-Gemini engines: the article check must not resolve redirects over
+    # the network in tests; page-level matching works the same for them.
+    articles = json.dumps({"page": {"title": "A page", "url": "https://brand.io/page"}})
+    brand_id = create_brand(client, articles=articles,
+                            engines=["perplexity", "openai"])
+    client.post(f"/brands/{brand_id}/run")
+    Session = client.app.state.Session
+    with Session() as s:
+        engine = s.get_bind()
+    with engine.connect() as conn:                      # the service's own engine
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+    with Session() as s:
+        assert s.query(Run).count() == 1
+        assert s.query(Answer).count() == 4             # 2 queries × 2 engines
+        assert s.query(Hit).count() == 8                # 2 domains per answer
+        assert s.query(ArticleHit).count() == 4         # every answer cites the page
+    r = client.post(f"/brands/{brand_id}/delete", follow_redirects=False)
+    assert r.status_code == 303
+    with Session() as s:
+        for model in (Brand, Run, Answer, Hit, ArticleHit):
+            assert s.query(model).count() == 0, model.__tablename__
+
+
+def test_brand_update_rejects_duplicate_name(client):
+    create_brand(client, name="Alpha")
+    beta = create_brand(client, name="Beta")
+    r = client.post(f"/brands/{beta}", data={**BRAND_FORM, "name": "Alpha"})
+    assert r.status_code == 400                         # not an IntegrityError crash
+    assert "already exists" in r.text
+    with client.app.state.Session() as s:
+        assert s.get(Brand, beta).name == "Beta"        # nothing was written
+    r = client.post(f"/brands/{beta}", data={**BRAND_FORM, "name": "Gamma"},
+                    follow_redirects=False)
+    assert r.status_code == 303                         # a free name still works
+
+
+def test_brand_update_error_keeps_history_and_shows_busy(client):
+    alpha = create_brand(client, name="Alpha")
+    beta = create_brand(client, name="Beta")
+    client.post(f"/brands/{beta}/run")
+    client.post(f"/brands/{beta}/run")                  # two done runs → history + compare
+    with client.app.state.Session() as s:
+        s.add(Run(brand_id=alpha, status="running", active=1))
+        s.commit()
+    r = client.post(f"/brands/{beta}",
+                    data={**BRAND_FORM, "name": "Beta", "samples": "0"})
+    assert r.status_code == 400 and "samples" in r.text
+    assert "const HISTORY" in r.text                    # history block survived
+    assert '<select name="a">' in r.text and '<select name="b">' in r.text
+    button = re.search(r"<button[^>]*>Run now</button>", r.text).group(0)
+    assert "disabled" in button                         # the slot is global
+    assert "(another run active)" in r.text
+
+
+def test_delete_refused_while_run_active_or_queued(client):
+    brand_id = create_brand(client)
+    Session = client.app.state.Session
+    for status, active in (("running", 1), ("pending", 1), ("queued", None)):
+        with Session() as s:
+            run = Run(brand_id=brand_id, status=status, active=active)
+            s.add(run)
+            s.commit()
+            run_id = run.id
+        r = client.post(f"/brands/{brand_id}/delete")
+        assert r.status_code == 409, (status, r.status_code)
+        assert "cannot delete a brand while its run is active or queued" in r.text
+        assert "cancel the run first" in r.text
+        assert "6 calls" in r.text                      # full context: estimate
+        assert f'<td class="mono">{run_id}</td>' in r.text  # full context: runs
+        with Session() as s:
+            assert s.get(Brand, brand_id) is not None   # nothing was deleted
+            assert s.get(Run, run_id) is not None
+            s.delete(s.get(Run, run_id))
+            s.commit()
+    r = client.post(f"/brands/{brand_id}/delete", follow_redirects=False)
+    assert r.status_code == 303                         # nothing waiting → delete works
+
+
+def test_run_now_disabled_when_another_brand_holds_the_slot(client):
+    alpha = create_brand(client, name="Alpha")
+    beta = create_brand(client, name="Beta")
+    Session = client.app.state.Session
+    with Session() as s:
+        s.add(Run(brand_id=alpha, status="running", active=1))
+        s.commit()
+
+    def run_now_button(page):
+        return re.search(r"<button[^>]*>Run now</button>", page).group(0)
+
+    page_b = client.get(f"/brands/{beta}").text
+    assert "disabled" in run_now_button(page_b)         # B has no runs of its own
+    assert "(another run active)" in page_b
+    page_a = client.get(f"/brands/{alpha}").text
+    assert "disabled" in run_now_button(page_a)         # own run → busy as before
+    assert "(another run active)" not in page_a         # the slot is its own
+    with Session() as s:
+        run = s.query(Run).filter(Run.active == 1).first()
+        run.status, run.active = "done", None
+        s.commit()
+    page_b = client.get(f"/brands/{beta}").text
+    assert "disabled" not in run_now_button(page_b)     # slot free → enabled again
+    assert "(another run active)" not in page_b
+
+
+def test_history_keeps_removed_niche_title_from_snapshot(client):
+    brand_id = create_brand(client)                     # niche "main", "Main niche"
+    client.post(f"/brands/{brand_id}/run")              # run 1 snapshots that title
+    r = client.post(f"/brands/{brand_id}",
+                    data={**BRAND_FORM, "niche_title": "Renamed title"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    client.post(f"/brands/{brand_id}/run")              # run 2 snapshots the new title
+    r = client.post(f"/brands/{brand_id}",              # now remove niche "main"
+                    data={**BRAND_FORM, "niche_key": "fresh",
+                          "niche_title": "Fresh", "queries": "q fresh"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    page = client.get(f"/brands/{brand_id}").text
+    m = re.search(r"const HISTORY = (\{.*?\});\n", page, re.S)
+    data = json.loads(m.group(1))
+    assert data["main"]["title"] == "Renamed title"     # latest snapshot, not the key
+    assert data["main"]["domains"]["brand.io"]["run_ids"] == [1, 2]
+
+
+def test_execute_run_survives_a_deleted_run_row(tmp_path, env):
+    """The run row vanishing mid-run (what an unguarded delete used to do)
+    must stop the run cleanly, not crash the worker thread on None."""
+    application = create_app(db_path=tmp_path / "gone.db")
+    Session = application.state.Session
+    with TestClient(application, base_url=LOCAL) as c:
+        brand_id = create_brand(c, queries="q1\nq2\nq3", engines=["gemini"])
+        run_id = runner.start_run(Session, brand_id)
+        reached, proceed = threading.Event(), threading.Event()
+
+        def blocking_ask(query, geo=""):
+            if query == "q2":
+                reached.set()
+                proceed.wait(10)
+            return fake_answer(query, geo)
+
+        env.setitem(gt.ENGINES["gemini"], "fn", blocking_ask)
+        failures = []
+
+        def target():
+            try:
+                runner.execute_run(Session, run_id)
+            except Exception as e:  # noqa: BLE001 — the point of the test
+                failures.append(e)
+
+        t = threading.Thread(target=target, daemon=True)
+        t.start()
+        assert reached.wait(10)                         # q1 saved, q2 in flight
+        with Session() as s:
+            s.delete(s.get(Run, run_id))                # brand stays; the run row goes
+            s.commit()
+        proceed.set()
+        t.join(15)
+        assert not t.is_alive()
+        assert failures == []                           # no AttributeError from None
+        with Session() as s:
+            assert s.get(Brand, brand_id) is not None
+            assert s.query(Run).count() == 0
+            assert s.query(Answer).count() == 0         # nothing orphaned

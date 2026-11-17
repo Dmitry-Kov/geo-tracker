@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (JSON, DateTime, ForeignKey, Integer, String, Text,
-                        create_engine, inspect)
+                        create_engine, event, inspect)
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column,
                             relationship, sessionmaker)
@@ -118,8 +118,25 @@ def make_engine(db_path: Path = None):
     # URL.create, not an f-string URL: a URL parsed from text is
     # percent-decoded by newer SQLAlchemy, so a path like ".../100%data/"
     # would silently point somewhere else.
-    return create_engine(URL.create("sqlite", database=str(path)),
-                         connect_args={"check_same_thread": False})
+    eng = create_engine(URL.create("sqlite", database=str(path)),
+                        connect_args={"check_same_thread": False})
+
+    @event.listens_for(eng, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # Per connection, not per engine: SQLite pragmas are connection-local.
+        # busy_timeout: the scheduler, the run thread and a request can meet
+        # on one writer — wait instead of raising "database is locked".
+        # foreign_keys: SQLite ignores FKs unless asked; cascades must hold.
+        # WAL: readers (pages, exports) do not block the run's writes.
+        cur = dbapi_conn.cursor()
+        try:
+            cur.execute("PRAGMA busy_timeout=5000")
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cur.close()
+
+    return eng
 
 
 def make_session_factory(engine):
@@ -172,7 +189,10 @@ def migrate_database(engine) -> None:
     if current in heads:
         return
     path = Path(engine.url.database) if engine.url.database else None
-    if path is not None and path.exists() and path.stat().st_size > 0:
+    # `tables` as well as size: journal_mode=WAL on connect writes page 1 even
+    # into a brand-new empty file, so a non-zero size alone no longer means
+    # there is anything to lose. An empty DB gets no backup.
+    if tables and path is not None and path.exists() and path.stat().st_size > 0:
         backup_database(path)
     # Alembic runs on this engine's own connection (see migrations/env.py)
     # rather than on a URL rebuilt from text: no second engine, and no path
