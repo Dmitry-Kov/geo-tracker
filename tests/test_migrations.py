@@ -4,14 +4,12 @@ get the schema, repeat startups change nothing, and the baseline matches
 the create_all schema of pre-Alembic main (semantically, via inspector)."""
 import logging
 import sqlite3
-from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect
-from sqlalchemy.orm import sessionmaker
 
-from app.db import (Answer, Base, Brand, Hit, Run, make_engine,
+from app.db import (Answer, BASE_DIR, Base, Brand, Hit, Run, make_engine,
                     migrate_database)
 from app.main import create_app
 
@@ -24,30 +22,47 @@ def env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def make_old_main_db(path):
-    """Exactly what pre-Alembic main did: create_all, plus some data."""
-    engine = create_engine(f"sqlite:///{path}")
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(engine, expire_on_commit=False)
-    with Session() as s:
-        b = Brand(name="OldBrand", domains=["old.io"], aliases={},
-                  niches={"n": {"title": "N", "primary_domain": "old.io",
-                                "queries": ["q"]}},
-                  articles={}, geo="", engines=["gemini"], models={},
-                  samples=1, schedule="")
-        s.add(b)
-        s.commit()
-        run = Run(brand_id=b.id, status="done", trigger="manual",
-                  total_calls=1, done_calls=1, config={"domains": ["old.io"]})
-        s.add(run)
-        s.commit()
-        a = Answer(id="oldrow000001", run_id=run.id, engine="gemini", niche="n",
-                   query="q", status="ok", model="m",
-                   run_ts=datetime.now(timezone.utc))
-        s.add(a)
-        s.add(Hit(answer_id=a.id, domain="old.io", src=1, txt=0))
-        s.commit()
+def make_v1_db(path, *, versioned):
+    """A database exactly at baseline 0001, with data — built by the
+    migration itself, not create_all (the current models already carry
+    columns 0001 does not have). versioned=False also drops alembic_version:
+    the state pre-Alembic main left behind."""
+    from alembic import command
+    from alembic.config import Config
+
+    engine = make_engine(path)
+    cfg = Config(str(BASE_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BASE_DIR / "migrations"))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "0001")
     engine.dispose()
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "INSERT INTO brands (name, domains, aliases, niches, articles, geo,"
+        " engines, models, samples, schedule, created_at)"
+        " VALUES ('OldBrand', '[\"old.io\"]', '{}',"
+        " '{\"n\": {\"title\": \"N\", \"primary_domain\": \"old.io\","
+        " \"queries\": [\"q\"]}}', '{}', '', '[\"gemini\"]', '{}', 1, '',"
+        " '2026-11-17 10:00:00')")
+    raw.execute(
+        "INSERT INTO runs (brand_id, status, trigger, error, total_calls,"
+        " done_calls, active, config, started_at, finished_at)"
+        " VALUES (1, 'done', 'manual', '', 1, 1, NULL,"
+        " '{\"domains\": [\"old.io\"]}', '2026-11-17 10:00:00',"
+        " '2026-11-17 10:01:00')")
+    raw.execute(
+        "INSERT INTO answers (id, run_id, engine, niche, query, model,"
+        " model_requested, geo, geo_applied, sample, status, answer_chars,"
+        " n_sources, searches, usage, receipt, all_source_domains, run_ts)"
+        " VALUES ('oldrow000001', 1, 'gemini', 'n', 'q', 'm', '', '', 0, 1,"
+        " 'ok', 5, 1, NULL, NULL, NULL, '', '2026-11-17 10:00:30')")
+    raw.execute("INSERT INTO hits (answer_id, domain, src, txt)"
+                " VALUES ('oldrow000001', 'old.io', 1, 0)")
+    if not versioned:
+        raw.execute("DROP TABLE alembic_version")
+    raw.commit()
+    raw.close()
     return path
 
 
@@ -67,7 +82,7 @@ def db_snapshot(path):
 
 
 def test_old_main_db_adopted_with_data_and_backup(tmp_path):
-    path = make_old_main_db(tmp_path / "old.db")
+    path = make_v1_db(tmp_path / "old.db", versioned=False)
     app = create_app(db_path=path)
     with TestClient(app, base_url="http://localhost") as c:
         assert "OldBrand" in c.get("/").text  # service works on the adopted DB
@@ -80,7 +95,7 @@ def test_old_main_db_adopted_with_data_and_backup(tmp_path):
         conn = sqlite3.connect(path)
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         conn.close()
-        assert version == "0001"
+        assert version == "0002"  # stamped 0001, then upgraded to head
 
     backups = list((tmp_path / "backups").glob("old-*.db"))
     assert len(backups) == 1
@@ -91,8 +106,44 @@ def test_old_main_db_adopted_with_data_and_backup(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table'")]
         # the copy was taken BEFORE any migration touched the file
         assert "alembic_version" not in tables
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
+        assert "cancel_requested" not in cols
     finally:
         conn.close()
+
+
+def test_upgrade_0001_with_data_to_0002(tmp_path):
+    """The first real migration: a versioned 0001 DB with data → startup →
+    data intact, version 0002, old rows get cancel_requested=0, and the
+    backup preserves the pre-migration (0001) state."""
+    path = make_v1_db(tmp_path / "v1.db", versioned=True)
+    app = create_app(db_path=path)
+    with TestClient(app, base_url="http://localhost") as c:
+        assert "OldBrand" in c.get("/").text
+        Session = app.state.Session
+        with Session() as s:
+            assert s.get(Brand, 1).name == "OldBrand"
+            run = s.get(Run, 1)
+            assert run.status == "done"
+            assert run.cancel_requested == 0  # server_default filled old rows
+            assert s.get(Answer, "oldrow000001").query == "q"
+            assert s.query(Hit).count() == 1
+    conn = sqlite3.connect(path)
+    version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+    conn.close()
+    assert version == "0002"
+
+    backups = list((tmp_path / "backups").glob("v1-*.db"))
+    assert len(backups) == 1
+    bconn = sqlite3.connect(backups[0])
+    try:
+        assert bconn.execute(
+            "SELECT version_num FROM alembic_version").fetchone()[0] == "0001"
+        assert bconn.execute("SELECT name FROM brands").fetchone()[0] == "OldBrand"
+        cols = [r[1] for r in bconn.execute("PRAGMA table_info(runs)")]
+        assert "cancel_requested" not in cols  # copy is pre-migration
+    finally:
+        bconn.close()
 
 
 def test_empty_db_gets_schema_without_backup(tmp_path):

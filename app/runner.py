@@ -6,6 +6,7 @@ Run.active is UNIQUE, so a second pending/running run cannot be inserted no
 matter how the triggers interleave. That is also what makes the per-brand
 model overrides (process-wide env vars) safe.
 """
+import math
 import os
 import time
 from datetime import datetime
@@ -19,9 +20,29 @@ from .db import Answer, ArticleHit, Brand, Hit, Run, utcnow
 
 SLEEP_SEC = 2.0
 ACTIVE = ("pending", "running")
+# Rough per-call wall time observed in live runs (latency + the 2s pause).
+# An estimate shown before launching, not a promise.
+EST_SEC_PER_CALL = 15
+BIG_RUN_CONFIRM = 100  # more calls than this → explicit confirmation required
 MODEL_ENV = {"gemini": "GEMINI_MODEL", "perplexity": "PERPLEXITY_MODEL",
              "openai": "OPENAI_MODEL"}
 INTERRUPTED = "interrupted: the service stopped before this run finished"
+
+
+class _Cancelled(Exception):
+    """Internal signal: the run's cancel_requested flag was seen between calls."""
+
+
+def run_estimate(b: Brand) -> dict:
+    """Calls a run of this brand would make right now: queries × engines
+    with keys × samples, plus a rough duration. Engines without a key in
+    the environment are skipped by execute_run, so they are skipped here."""
+    engines = [e for e in b.engines
+               if e in gt.ENGINES and os.environ.get(gt.ENGINES[e]["env"])]
+    calls = (sum(len(ncfg["queries"]) for ncfg in b.niches.values())
+             * len(engines) * b.samples)
+    return {"calls": calls, "engines": engines,
+            "minutes": math.ceil(calls * EST_SEC_PER_CALL / 60) if calls else 0}
 
 
 def brand_config(b: Brand) -> dict:
@@ -130,6 +151,14 @@ def execute_run(Session, run_id: int) -> None:
         run = s.get(Run, run_id)
         if run is None or run.status != "pending":
             return
+        if run.cancel_requested:
+            # Cancelled while queued (e.g. a scheduled tick waiting for the
+            # active slot): stop before any call, free the slot.
+            run.status = "cancelled"
+            run.active = None
+            run.finished_at = utcnow()
+            s.commit()
+            return
         cfg = run_config(run)
         run.status = "running"
         run.started_at = utcnow()
@@ -143,7 +172,7 @@ def execute_run(Session, run_id: int) -> None:
             old_models[MODEL_ENV[e]] = os.environ.get(MODEL_ENV[e])
             os.environ[MODEL_ENV[e]] = m
 
-    dead, error = set(), None
+    dead, error, cancelled = set(), None, False
     try:
         total = (sum(len(ncfg["queries"]) for ncfg in cfg["niches"].values())
                  * len(engines) * cfg["samples"])
@@ -158,6 +187,11 @@ def execute_run(Session, run_id: int) -> None:
                         continue
                     geo_applied = int(bool(cfg["geo"]) and gt.GEO_SUPPORTED[engine])
                     for sample in range(1, cfg["samples"] + 1):
+                        # Cancellation is honored between calls: the answer
+                        # in flight finishes, everything collected is kept.
+                        with Session() as s:
+                            if s.get(Run, run_id).cancel_requested:
+                                raise _Cancelled()
                         answer, status = None, "ok"
                         try:
                             answer = gt.ENGINES[engine]["fn"](query, cfg["geo"])
@@ -206,6 +240,8 @@ def execute_run(Session, run_id: int) -> None:
                         if engine in dead:
                             break
                         time.sleep(SLEEP_SEC)
+    except _Cancelled:
+        cancelled = True
     except Exception as e:  # noqa: BLE001 — surface on the run, don't crash the app
         error = str(e)
     finally:
@@ -216,7 +252,7 @@ def execute_run(Session, run_id: int) -> None:
                 os.environ[key] = val
         with Session() as s:
             run = s.get(Run, run_id)
-            run.status = "error" if error else "done"
+            run.status = "cancelled" if cancelled else ("error" if error else "done")
             run.error = error or ""
             run.active = None  # free the slot for the next run
             run.finished_at = utcnow()

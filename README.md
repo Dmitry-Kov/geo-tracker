@@ -385,7 +385,14 @@ the service does not need it.
   per-answer receipts (raw answer, served vs requested model, usage/cost)
   drill down in the browser. Each run stores a snapshot of the brand's
   configuration: results and exports of a finished run never change when the
-  brand is edited later.
+  brand is edited later. Before launching, the brand page shows the call
+  estimate (queries × engines with keys × samples) and a rough duration
+  (~15 s per call, an estimate not a promise); over 100 calls a confirmation
+  dialog with that number is required, and the server refuses a bare POST
+  without it. **Cancel** stops a run between calls: the in-flight answer
+  finishes, everything collected is kept, the run gets status `cancelled`
+  and the active slot is freed. A scheduled run still waiting in the queue
+  can be cancelled too — it will make no calls.
 - **Results**: visibility matrix, the same audit-grade 95% CI (Wilson /
   cluster bootstrap), resource-usage summary; export the branded HTML
   dashboard or DOCX (en/ru) per run.

@@ -64,6 +64,10 @@ class Run(Base):
     # exports of a finished run are read against this snapshot, never against
     # the brand as it is edited later.
     config: Mapped[dict] = mapped_column(JSON, nullable=True)
+    # Set to 1 by POST /runs/{id}/cancel. execute_run checks it between calls
+    # and stops with status "cancelled", keeping the answers already collected.
+    cancel_requested: Mapped[int] = mapped_column(Integer, nullable=False,
+                                                  default=0, server_default="0")
     brand: Mapped[Brand] = relationship(back_populates="runs")
     answers: Mapped[list["Answer"]] = relationship(
         back_populates="run", cascade="all, delete-orphan",

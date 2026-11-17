@@ -4,6 +4,11 @@
 <div class="head-row">
   <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ run {{ run.id }}</span></h1>
   <div class="row-actions">
+    {% if active %}
+    <form method="post" action="/runs/{{ run.id }}/cancel" class="inline">
+      <button class="btn danger" type="submit">Cancel</button>
+    </form>
+    {% endif %}
     <a class="btn" href="/runs/{{ run.id }}/report.html">Dashboard HTML</a>
     <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=en">DOCX en</a>
     <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=ru">DOCX ru</a>

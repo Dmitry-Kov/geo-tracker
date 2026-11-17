@@ -31,7 +31,8 @@ from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 from .db import Answer, Brand, Run, make_engine, make_session_factory, migrate_database
 from .login_guard import LoginLimiter
-from .runner import execute_run, recover_interrupted, run_rows, start_run
+from .runner import (ACTIVE, BIG_RUN_CONFIRM, execute_run, recover_interrupted,
+                     run_estimate, run_rows, start_run)
 from .scheduler import cron_trigger, make_scheduler
 
 APP_DIR = Path(__file__).resolve().parent
@@ -338,7 +339,8 @@ def create_app(db_path=None) -> FastAPI:
             busy = any(r.status in ("pending", "running") for r in runs)
             return render(request, "brand_form.html",
                           {"brand": b, "values": form_values(brand=b), "error": "",
-                           "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy})
+                           "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy,
+                           "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM})
 
     @app.post("/brands/{brand_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     async def brand_update(request: Request, brand_id: int):
@@ -352,7 +354,8 @@ def create_app(db_path=None) -> FastAPI:
                 return render(request, "brand_form.html",
                               {"brand": b, "values": form_values(form=form),
                                "error": error, "engines_all": list(gt.ENGINES),
-                               "runs": list(b.runs), "busy": False}, status=400)
+                               "runs": list(b.runs), "busy": False,
+                               "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM}, status=400)
             for k, v in cfg.items():
                 setattr(b, k, v)
             s.commit()
@@ -372,11 +375,32 @@ def create_app(db_path=None) -> FastAPI:
 
     # -- runs ---------------------------------------------------------------
     @app.post("/brands/{brand_id}/run", dependencies=[Depends(auth_guard)])
-    def run_trigger(brand_id: int, background: BackgroundTasks):
+    async def run_trigger(brand_id: int, background: BackgroundTasks, request: Request):
+        form = await request.form()
+        with Session() as s:
+            b = s.get(Brand, brand_id)
+            if b is None:
+                raise HTTPException(404, "brand not found")
+            est = run_estimate(b)
+        # Big runs need an explicit confirmation carrying the call count —
+        # the browser dialog sets big_confirmed; a bare POST does not start it.
+        if est["calls"] > BIG_RUN_CONFIRM and form.get("big_confirmed") != "1":
+            return RedirectResponse(f"/brands/{brand_id}", status_code=303)
         run_id = start_run(Session, brand_id, trigger="manual")
         if run_id is None:
             return RedirectResponse(f"/brands/{brand_id}", status_code=303)
         background.add_task(execute_run, Session, run_id)
+        return RedirectResponse(f"/runs/{run_id}", status_code=303)
+
+    @app.post("/runs/{run_id}/cancel", dependencies=[Depends(auth_guard)])
+    def run_cancel(run_id: int):
+        with Session() as s:
+            run = s.get(Run, run_id)
+            if run is None:
+                raise HTTPException(404, "run not found")
+            if run.status in ACTIVE:
+                run.cancel_requested = 1
+                s.commit()
         return RedirectResponse(f"/runs/{run_id}", status_code=303)
 
     def run_context(s, run):
@@ -413,6 +437,7 @@ def create_app(db_path=None) -> FastAPI:
                 agg["cost_known"] = True
         return {"run": run, "brand": b, "cfg": cfg, "matrix": matrix, "audit": audit,
                 "usage": usage, "answers": list(run.answers),
+                "active": run.status in ACTIVE,
                 "B": DEFAULT_B, "seed": DEFAULT_SEED, "N": MIN_BOOTSTRAP_QUERIES}
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])

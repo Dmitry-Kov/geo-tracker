@@ -45,6 +45,7 @@ tr:last-child td { border-bottom: none; }
 .badge.done, .badge.ok { background: var(--ok-soft); color: var(--ok); }
 .badge.running, .badge.pending { background: var(--run-soft); color: var(--run); }
 .badge.error { background: var(--err-soft); color: var(--err); }
+.badge.cancelled { background: #f3f4f6; color: #6b7280; }
 .btn { display: inline-block; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--card); color: var(--ink); font-size: 13.5px; text-decoration: none; cursor: pointer; }
 .btn:hover { border-color: var(--muted); }

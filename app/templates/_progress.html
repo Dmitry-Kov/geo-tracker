@@ -8,7 +8,7 @@
   <span class="badge {{ run.status }}">{{ run.status }}</span>
   <span class="mono">{{ run.done_calls }}/{{ run.total_calls }} calls</span>
   {% if run.error %}<span class="err">{{ run.error }}</span>{% endif %}
-  {% if refresh and run.status in ['done', 'error'] %}
+  {% if refresh and run.status in ['done', 'error', 'cancelled'] %}
   <span hx-get="/runs/{{ run.id }}" hx-trigger="load delay:300ms"
         hx-select="#main" hx-target="#main" hx-swap="outerHTML"></span>
   {% endif %}
