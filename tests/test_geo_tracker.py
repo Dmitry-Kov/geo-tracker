@@ -72,6 +72,69 @@ def test_match_domains_src_txt_and_aliases(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Matching rules v2: subdomains in text/titles, no dot-continuation,
+# word-boundary aliases (each case verified against the old behavior)
+# ---------------------------------------------------------------------------
+
+def test_text_subdomain_counts_like_url():
+    assert gt.domain_in_text("brand.io", "see shop.brand.io")
+    assert gt.domain_in_text("brand.io", "a.b.brand.io")
+    assert gt.domain_in_url("brand.io", "https://shop.brand.io/x")  # parity
+
+
+def test_title_subdomain_counts_as_src():
+    hits = gt.match_domains("no domains here", [], ["shop.brand.io"],
+                            domains=["brand.io"], aliases={})
+    assert hits["brand.io"]["src"] == 1
+
+
+def test_text_dot_continuation_rejected():
+    assert not gt.domain_in_text("brand.io", "visit brand.io.evil.com")
+    assert not gt.domain_in_text("brand.io", "brand.io.shop")
+    hits = gt.match_domains("visit brand.io.evil.com", [], [],
+                            domains=["brand.io"], aliases={})
+    assert hits["brand.io"]["txt"] == 0
+
+
+def test_text_sentence_final_dot_counts():
+    assert gt.domain_in_text("brand.io", "Go to brand.io.")
+    assert gt.domain_in_text("brand.io", "Go to brand.io. Next sentence")
+    assert gt.domain_in_text("brand.io", "brand.io, brand.io; (brand.io)")
+
+
+def test_text_url_and_old_guarantees():
+    assert gt.domain_in_text("brand.io", "https://brand.io/pricing")
+    assert gt.domain_in_text("brand.io", "BRAND.IO")
+    assert not gt.domain_in_text("pc.uz", "1pc.uz")
+    assert not gt.domain_in_text("brand.io", "my-brand.io")
+    assert not gt.domain_in_text("brand.io", "brand.ioverse")
+
+
+def test_aliases_match_on_word_boundaries():
+    aliases = {"brand.io": ["Apex"]}
+    hits = gt.match_domains("apexcharts is a chart library", [], [],
+                            domains=["brand.io"], aliases=aliases)
+    assert hits["brand.io"]["txt"] == 0
+    for text in ("try Apex today", "APEX rocks", "the apex tool"):
+        hits = gt.match_domains(text, [], [], domains=["brand.io"], aliases=aliases)
+        assert hits["brand.io"]["txt"] == 1, text
+
+
+def test_multiword_alias_boundaries():
+    aliases = {"brand.io": ["Example Brand"]}
+    hits = gt.match_domains("example brand new world", [], [],
+                            domains=["brand.io"], aliases=aliases)
+    assert hits["brand.io"]["txt"] == 1
+    hits = gt.match_domains("example brandnew world", [], [],
+                            domains=["brand.io"], aliases=aliases)
+    assert hits["brand.io"]["txt"] == 0
+
+
+def test_match_rules_version_is_v2():
+    assert gt.MATCH_RULES_VERSION == 2
+
+
+# ---------------------------------------------------------------------------
 # Provenance: schema, make_row, receipts, roundtrip
 # ---------------------------------------------------------------------------
 

@@ -49,12 +49,13 @@ detection to fight.
 - Optional article tracking (`ARTICLES`): checks whether specific pages —
   placed articles, landing pages — are among an answer's sources, not just
   their domain. A big portal being cited doesn't mean your page was
-- Known limitation, kept on purpose so historical runs stay comparable:
-  under Gemini, `src` is matched against `web.title` (its citation URIs are
-  opaque Google redirects), and title matching does not resolve subdomains —
-  so hosts like `uz.wikipedia.org` are not counted toward `wikipedia.org`.
-  Gemini undercounts subdomain-heavy domains; Perplexity and OpenAI match
-  real URLs and are unaffected. The article check is not limited this way:
+- Gemini's `src` is matched against `web.title` (its citation URIs are
+  opaque Google redirects), deliberately NOT against resolved links, so
+  historical runs stay comparable. Since matching rules v2, titles get
+  the same subdomain semantics as URLs (`uz.wikipedia.org` counts toward
+  `wikipedia.org`); under v1 Gemini undercounted subdomain-heavy domains.
+  Every service run snapshots the rules version in `Run.config`. The
+  article check is not limited this way:
   with `ARTICLES` set, Gemini's redirects are resolved during the run
 - Append-only CSV history — interrupted runs lose nothing, every run is a
   new data point on the trend. `run` and `manual-import` refuse to append to
@@ -89,6 +90,21 @@ tier includes a Google Search grounding quota).
 
 `queries.py` and `.env` are local configuration and are gitignored.
 
+## What exactly is measured
+
+The tracker queries the **official APIs with web search enabled**
+(Gemini `generateContent` + `google_search`, Perplexity Sonar, OpenAI
+Responses + `web_search`). That is not the same product a human sees in
+the ChatGPT app, the Gemini app, or Google's AI Overviews: those carry
+their own retrieval pipelines, ranking, personalization and UI. The
+numbers here describe **API behavior for a fixed model, geo and date** —
+a reproducible measurement contract, not a screenshot of what any
+particular user was shown. Model aliases resolve to dated versions
+(recorded per answer), engines decide themselves whether to search at
+all (ungrounded answers are reported as a separate channel), and
+repeated samples of one query are correlated — hence the query-clustered
+confidence intervals.
+
 ## How it works
 
 `run` iterates the query matrix (niche × query × engine) and appends one row
@@ -116,8 +132,22 @@ URLs, source titles:
 - `txt` — the domain is mentioned in the answer text (the AI recommends
   you).
 
-URL matching is exact-host (subdomains count, lookalikes don't); text
-matching uses word boundaries.
+URL matching is exact-host (subdomains count, lookalikes don't). Text and
+source-title matching (rules v2) uses the same host semantics:
+`shop.brand.io` counts as `brand.io`; `1pc.uz` and `my-brand.io` don't;
+`brand.io.evil.com` doesn't (a dot followed by more name is a longer
+host), while a sentence-final dot ("Go to brand.io.") does count;
+`https://brand.io/pricing` inside text counts. Brand aliases match on
+word boundaries, case-insensitive ("Apex" hits "try Apex today", not
+"apexcharts").
+
+**Matching rules version.** `MATCH_RULES_VERSION` (currently **2**) is
+snapshotted into every service run's `Run.config`. v1 → v2 (2026-11-17):
+subdomains now count in text and source titles, a dot followed by a name
+continuation no longer counts, and aliases moved from substring to
+word-boundary matching. The rules change the numbers, so runs measured
+under different versions are not directly comparable; service snapshots
+taken before v2 lack the key and read as version 1.
 
 For every page in `ARTICLES`, `art_<key>` is 1 when that page is among the
 answer's sources. Pages are compared by host and path, ignoring the scheme,

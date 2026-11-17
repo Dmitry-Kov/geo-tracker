@@ -29,11 +29,14 @@ def brand_config(b: Brand) -> dict:
     return {"domains": list(b.domains), "aliases": dict(b.aliases),
             "niches": dict(b.niches), "articles": dict(b.articles),
             "geo": b.geo, "engines": list(b.engines),
-            "models": dict(b.models), "samples": b.samples}
+            "models": dict(b.models), "samples": b.samples,
+            "match_rules_version": gt.MATCH_RULES_VERSION}
 
 
 def run_config(run: Run) -> dict:
-    """The configuration a run was measured under (its snapshot)."""
+    """The configuration a run was measured under (its snapshot).
+    Snapshots taken before match_rules_version existed lack the key —
+    consumers must read it as .get("match_rules_version", 1)."""
     return run.config or brand_config(run.brand)
 
 

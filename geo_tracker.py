@@ -96,6 +96,15 @@ def load_env() -> None:
 # Domain matching
 # ---------------------------------------------------------------------------
 
+# Bumped whenever the matching rules change, so runs stay comparable:
+# Run.config snapshots it, and cross-run comparisons refuse to mix versions.
+# v1: text mentions required a bare domain (no subdomains), a trailing dot
+#     could continue into a longer host, aliases matched as substrings.
+# v2: subdomains count in text/titles like in URLs; domain + "." + name
+#     continuation is rejected; aliases match on word boundaries.
+MATCH_RULES_VERSION = 2
+
+
 def domain_in_url(domain: str, url: str) -> bool:
     """Exact host match: pc.uz matches pc.uz and www.pc.uz, but not 1pc.uz."""
     try:
@@ -107,8 +116,18 @@ def domain_in_url(domain: str, url: str) -> bool:
 
 
 def domain_in_text(domain: str, text: str) -> bool:
-    """Domain mention in text with word boundaries so pc.uz won't catch 1pc.uz."""
-    pattern = r"(?<![\w.-])" + re.escape(domain) + r"(?![\w-])"
+    """Domain mention in text or source titles, same host semantics as URLs:
+    shop.brand.io counts as brand.io; 1pc.uz and my-brand.io do not;
+    brand.io.evil.com does not (dot + name continuation), while a
+    sentence-final dot ("Go to brand.io.") does count."""
+    pattern = (r"(?<![\w-])" + re.escape(domain) + r"(?!\.\w)(?![\w-])")
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def alias_in_text(alias: str, text: str) -> bool:
+    """Brand alias on word boundaries, case-insensitive: 'Apex' matches
+    'try Apex today' but not 'apexcharts'."""
+    pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
@@ -126,7 +145,7 @@ def match_domains(answer_text: str, source_urls: list, source_titles: list, *,
     for d in domains:
         src = any(domain_in_url(d, u) for u in source_urls) or domain_in_text(d, titles_blob)
         txt = domain_in_text(d, answer_text) or any(
-            alias.lower() in answer_text.lower()
+            alias_in_text(alias, answer_text)
             for alias in aliases.get(d, []))
         hits[d] = {"src": int(src), "txt": int(txt)}
     return hits
