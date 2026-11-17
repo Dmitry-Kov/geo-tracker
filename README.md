@@ -347,6 +347,14 @@ the service does not need it.
   a reverse proxy, forward the original `Host` header). `APP_SECRET` pins the
   session key across restarts. `GEO_DB_PATH` moves the SQLite file (default
   `geo_tracker.db`, gitignored — it contains client domains).
+- **Login hardening**: 5 failed logins within 15 minutes from one address
+  block further attempts (HTTP 429 + `Retry-After`) until the oldest failure
+  leaves the window; a successful login resets the count. The limit is
+  in-memory per process. Behind a reverse proxy run uvicorn with
+  `--proxy-headers --forwarded-allow-ips=<proxy address>` so the limiter sees
+  real client addresses (raw `X-Forwarded-For` is never trusted). Set
+  `APP_HTTPS_ONLY=1` when TLS terminates in front of the service: the session
+  cookie gets the `Secure` flag and browsers will not send it over plain HTTP.
 - **Scheduler**: APScheduler cron per brand, **in UTC** (`0 9 * * 1` =
   Mondays 09:00 UTC). Scheduled runs queue: brands on the same tick run one
   after another, and a tick that lands on a manual run waits for it. A tick
@@ -355,8 +363,8 @@ the service does not need it.
   service was stopped is not replayed.
 
 Slice-1 limits, stated honestly: one run
-at a time, single user, single process, no limit on login attempts (put it
-behind a proxy that rate-limits if it is exposed). Trends across runs, users and
+at a time, single user, single process (the login limiter, the run queue and
+the scheduler live in it). Trends across runs, users and
 billing are the next slices.
 
 ## Roadmap

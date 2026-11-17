@@ -30,6 +30,7 @@ from report_docx import build_docx
 from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 from .db import Answer, Brand, Run, init_db, make_engine, make_session_factory
+from .login_guard import LoginLimiter
 from .runner import execute_run, recover_interrupted, run_rows, start_run
 from .scheduler import cron_trigger, make_scheduler
 
@@ -39,6 +40,10 @@ TEMPLATES = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def allowed_hosts():
@@ -193,13 +198,18 @@ def form_values(brand=None, form=None) -> dict:
 
 
 def create_app(db_path=None) -> FastAPI:
+    # .env first. Everything below takes its settings from the environment
+    # while the app is being built — the database path, the session key, the
+    # cookie flags. Loaded any later (it used to happen at startup), those
+    # settings silently fell back to their defaults when they came from .env.
+    gt.load_env()
     engine = make_engine(db_path)
     Session = make_session_factory(engine)
     sched, sync_schedule, load_schedules, stop_queue = make_scheduler(Session)
+    login_limiter = LoginLimiter()
 
     @asynccontextmanager
     async def lifespan(app):
-        gt.load_env()
         init_db(engine)
         # Before anything can start a run: a run left active by the previous
         # process is dead and would block every new one.
@@ -221,10 +231,15 @@ def create_app(db_path=None) -> FastAPI:
 
     app.add_middleware(
         SessionMiddleware,
-        secret_key=os.environ.get("APP_SECRET") or secrets.token_hex(32))
+        secret_key=os.environ.get("APP_SECRET") or secrets.token_hex(32),
+        # APP_HTTPS_ONLY: mark the session cookie Secure when the service
+        # sits behind HTTPS. Browsers then refuse to send it over plain
+        # HTTP — enable it only when TLS terminates in front of the app.
+        https_only=env_flag("APP_HTTPS_ONLY"))
     app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
     app.state.Session = Session
     app.state.scheduler = sched
+    app.state.login_limiter = login_limiter
 
     def auth_guard(request: Request):
         if not os.environ.get("APP_PASSWORD"):
@@ -233,11 +248,12 @@ def create_app(db_path=None) -> FastAPI:
             return
         raise HTTPException(status_code=307, headers={"Location": "/login"})
 
-    def render(request, template, ctx=None, status=200):
+    def render(request, template, ctx=None, status=200, headers=None):
         base = {"request": request, "authed": bool(request.session.get("authed")),
                 "auth_enabled": bool(os.environ.get("APP_PASSWORD"))}
         base.update(ctx or {})
-        return TEMPLATES.TemplateResponse(request, template, base, status_code=status)
+        return TEMPLATES.TemplateResponse(request, template, base,
+                                          status_code=status, headers=headers)
 
     # -- auth ---------------------------------------------------------------
     @app.get("/login", response_class=HTMLResponse)
@@ -248,12 +264,20 @@ def create_app(db_path=None) -> FastAPI:
 
     @app.post("/login", response_class=HTMLResponse)
     async def login_submit(request: Request):
+        ip = request.client.host if request.client else "unknown"
+        if login_limiter.blocked(ip):
+            return render(request, "login.html",
+                          {"error": "Too many failed attempts — try again later"},
+                          status=429,
+                          headers={"Retry-After": str(login_limiter.retry_after(ip))})
         form = await request.form()
         given = str(form.get("password") or "").encode()
         expected = (os.environ.get("APP_PASSWORD") or "").encode()
         if expected and secrets.compare_digest(given, expected):
+            login_limiter.reset(ip)
             request.session["authed"] = True
             return RedirectResponse("/", status_code=303)
+        login_limiter.record_failure(ip)
         return render(request, "login.html",
                       {"error": "Wrong password"}, status=401)
 
