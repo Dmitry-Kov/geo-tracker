@@ -459,6 +459,15 @@ def test_editing_the_brand_does_not_rewrite_a_finished_run(client):
     assert "newrival.com" in fresh and "Renamed" in fresh
 
 
+def test_run_config_snapshots_the_matching_rules_version(client):
+    brand_id = create_brand(client)
+    client.post(f"/brands/{brand_id}/run")
+    Session = client.app.state.Session
+    with Session() as s:
+        cfg = s.get(Run, 1).config
+        assert cfg["match_rules_version"] == gt.MATCH_RULES_VERSION == 2
+
+
 def test_run_crossing_utc_midnight_is_reported_whole(client):
     from report_html import _prepare
     brand_id = create_brand(client, engines=["gemini"])

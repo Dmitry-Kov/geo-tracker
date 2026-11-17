@@ -96,6 +96,23 @@ def load_env() -> None:
 # Domain matching
 # ---------------------------------------------------------------------------
 
+# Bumped whenever the matching rules change, so runs stay comparable:
+# Run.config snapshots it, and cross-run comparisons refuse to mix versions.
+# v1: text mentions required a bare domain (no subdomains), a trailing dot
+#     could continue into a longer host, aliases matched as substrings.
+# v2: subdomains count in text/titles like in URLs; domain + "." + name
+#     continuation is rejected; aliases match whole words, or word starts
+#     when written with a trailing "*"; source titles decide src only for
+#     engines whose titles are host names (Gemini) — under v1 a third-party
+#     page whose title named the domain counted as that domain being cited.
+MATCH_RULES_VERSION = 2
+
+# Engines whose source "title" is the source's host name rather than the page
+# title: Gemini hides the real URL behind a redirect and puts the host there.
+# Everywhere else the title is free text written by the cited page.
+HOST_TITLE_ENGINES = {"gemini"}
+
+
 def domain_in_url(domain: str, url: str) -> bool:
     """Exact host match: pc.uz matches pc.uz and www.pc.uz, but not 1pc.uz."""
     try:
@@ -107,26 +124,53 @@ def domain_in_url(domain: str, url: str) -> bool:
 
 
 def domain_in_text(domain: str, text: str) -> bool:
-    """Domain mention in text with word boundaries so pc.uz won't catch 1pc.uz."""
-    pattern = r"(?<![\w.-])" + re.escape(domain) + r"(?![\w-])"
+    """Domain mention in text or source titles, same host semantics as URLs:
+    shop.brand.io counts as brand.io; 1pc.uz and my-brand.io do not;
+    brand.io.evil.com does not (dot + name continuation), while a
+    sentence-final dot ("Go to brand.io.") does count."""
+    pattern = (r"(?<![\w-])" + re.escape(domain) + r"(?!\.\w)(?![\w-])")
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def alias_in_text(alias: str, text: str) -> bool:
+    """Brand alias as a whole word, case-insensitive: 'Apex' matches
+    'try Apex today' but not 'apexcharts'.
+
+    A trailing "*" matches the start of a word instead, for languages that
+    inflect names: 'Бренд*' matches 'Бренда' and 'в Бренде'. Use a stem
+    distinctive enough not to open other words. An empty alias never matches.
+    """
+    stem = alias.strip()
+    prefix = stem.endswith("*")
+    stem = stem.rstrip("*").strip()
+    if not stem:
+        return False
+    pattern = r"(?<!\w)" + re.escape(stem) + (r"\w*" if prefix else r"(?!\w)")
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
 def match_domains(answer_text: str, source_urls: list, source_titles: list, *,
-                  domains: list = None, aliases: dict = None) -> dict:
+                  domains: list = None, aliases: dict = None,
+                  titles_are_hosts: bool = False) -> dict:
     """For each domain: src (among sources) and txt (in the answer text).
 
     domains/aliases default to the queries.py config (CLI); the service
     passes per-brand config explicitly.
+
+    titles_are_hosts: pass True only for engines in HOST_TITLE_ENGINES. Then
+    a title naming the domain means the domain is the source. For any other
+    engine the title is the cited page's own headline — "Brand.io review" on
+    someone else's site — and must not count as brand.io being cited; their
+    real URLs decide src.
     """
     domains = DOMAINS if domains is None else domains
     aliases = BRAND_ALIASES if aliases is None else aliases
     hits = {}
-    titles_blob = " ".join(source_titles)
+    titles_blob = " ".join(source_titles) if titles_are_hosts else ""
     for d in domains:
         src = any(domain_in_url(d, u) for u in source_urls) or domain_in_text(d, titles_blob)
         txt = domain_in_text(d, answer_text) or any(
-            alias.lower() in answer_text.lower()
+            alias_in_text(alias, answer_text)
             for alias in aliases.get(d, []))
         hits[d] = {"src": int(src), "txt": int(txt)}
     return hits
@@ -147,7 +191,7 @@ def normalize_host(value: str) -> str:
 
 def extract_source_domains(engine: str, urls: list, titles: list) -> list:
     """All source hostnames in an answer, tracked or not (for all_source_domains)."""
-    values = titles if engine == "gemini" else urls
+    values = titles if engine in HOST_TITLE_ENGINES else urls
     seen, out = set(), []
     for v in values:
         host = normalize_host(v)
@@ -515,7 +559,8 @@ def make_row(engine: str, niche: str, query: str, *, status: str = "ok",
         row["answer_chars"] = len(answer["text"])
         row["n_sources"] = len(answer["urls"])
         hits = match_domains(answer["text"], answer["urls"], answer["titles"],
-                             domains=domains, aliases=aliases)
+                             domains=domains, aliases=aliases,
+                             titles_are_hosts=engine in HOST_TITLE_ENGINES)
         for d, h in hits.items():
             row[f"src_{d}"] = h["src"]
             row[f"txt_{d}"] = h["txt"]
