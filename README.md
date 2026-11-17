@@ -326,7 +326,8 @@ ends whatever run was active (it is closed as `interrupted` on the next
 start, so it never blocks later runs). `queries.py` is CLI configuration;
 the service does not need it.
 
-- **Brands**: domains, one niche with queries (slice 1), optional articles
+- **Brands**: domains, one or more niches with queries (add/remove niche
+  rows right in the form), optional articles
   and aliases (JSON), geo, engines, per-engine model overrides, samples,
   cron schedule. Domains are data, not columns — editing them needs no
   migration.
@@ -361,9 +362,9 @@ the service does not need it.
   run. Schedules are not persisted across downtime — a tick missed while the
   service was stopped is not replayed.
 
-Slice-1 limits, stated honestly: one niche per brand via the form, one run
+Slice-1 limits, stated honestly: one run
 at a time, single user, single process (the login limiter, the run queue and
-the scheduler live in it). Multi-niche editing, trends across runs, users and
+the scheduler live in it). Trends across runs, users and
 billing are the next slices.
 
 ## Roadmap

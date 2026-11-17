@@ -20,3 +20,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# локальные файлы Qwen (скриншоты проверок)
+.qwen/
