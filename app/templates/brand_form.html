@@ -5,7 +5,13 @@
   <h1>{{ "Edit brand" if brand else "New brand" }}</h1>
   {% if brand %}
   <div class="row-actions">
-    <form method="post" action="/brands/{{ brand.id }}/run" class="inline">
+    <span class="mono small muted" title="queries × engines with keys × samples; ~15 s per call">
+      {{ estimate.calls }} calls · ~{{ estimate.minutes }} min</span>
+    <form method="post" action="/brands/{{ brand.id }}/run" class="inline"
+          {% if estimate.calls > big_confirm %}
+          onsubmit="if (!confirm('This run will make {{ estimate.calls }} API calls (~{{ estimate.minutes }} min). Continue?')) return false; this.big_confirmed.value='1';"
+          {% endif %}>
+      <input type="hidden" name="big_confirmed" value="0">
       <button class="btn primary" type="submit" {{ "disabled" if busy }}>Run now</button>
     </form>
     <form method="post" action="/brands/{{ brand.id }}/delete" class="inline"

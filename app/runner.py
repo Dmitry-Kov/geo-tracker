@@ -6,6 +6,7 @@ Run.active is UNIQUE, so a second pending/running run cannot be inserted no
 matter how the triggers interleave. That is also what makes the per-brand
 model overrides (process-wide env vars) safe.
 """
+import math
 import os
 import time
 from datetime import datetime
@@ -19,9 +20,33 @@ from .db import Answer, ArticleHit, Brand, Hit, Run, utcnow
 
 SLEEP_SEC = 2.0
 ACTIVE = ("pending", "running")
+# A scheduled tick that has to wait for the active slot is a run too: a row
+# with this status, so the wait is visible on the brand and can be cancelled.
+QUEUED = "queued"
+WAITING = ACTIVE + (QUEUED,)   # everything that is not over yet
+# Rough per-call wall time observed in live runs (latency + the 2s pause).
+# An estimate shown before launching, not a promise.
+EST_SEC_PER_CALL = 15
+BIG_RUN_CONFIRM = 100  # more calls than this → explicit confirmation required
 MODEL_ENV = {"gemini": "GEMINI_MODEL", "perplexity": "PERPLEXITY_MODEL",
              "openai": "OPENAI_MODEL"}
 INTERRUPTED = "interrupted: the service stopped before this run finished"
+
+
+class _Cancelled(Exception):
+    """Internal signal: the run's cancel_requested flag was seen between calls."""
+
+
+def run_estimate(b: Brand) -> dict:
+    """Calls a run of this brand would make right now: queries × engines
+    with keys × samples, plus a rough duration. Engines without a key in
+    the environment are skipped by execute_run, so they are skipped here."""
+    engines = [e for e in b.engines
+               if e in gt.ENGINES and os.environ.get(gt.ENGINES[e]["env"])]
+    calls = (sum(len(ncfg["queries"]) for ncfg in b.niches.values())
+             * len(engines) * b.samples)
+    return {"calls": calls, "engines": engines,
+            "minutes": math.ceil(calls * EST_SEC_PER_CALL / 60) if calls else 0}
 
 
 def brand_config(b: Brand) -> dict:
@@ -66,7 +91,7 @@ def recover_interrupted(Session) -> int:
     """
     with Session() as s:
         stale = s.query(Run).filter(or_(Run.active == 1,
-                                        Run.status.in_(ACTIVE))).all()
+                                        Run.status.in_(WAITING))).all()
         for run in stale:
             run.status = "error"
             run.error = INTERRUPTED
@@ -76,14 +101,89 @@ def recover_interrupted(Session) -> int:
         return len(stale)
 
 
-def record_skipped(Session, brand_id: int, reason: str) -> None:
-    """Leave a visible trace of a scheduled run that never started."""
+def queue_run(Session, brand_id: int, trigger: str = "scheduled"):
+    """Record a run that is waiting for the active slot; None if the brand is gone.
+
+    The row holds no slot (active stays NULL) and no config yet — the snapshot
+    is taken when the run actually starts, so it measures the brand as it is
+    then, not as it was when the wait began.
+    """
     with Session() as s:
         if s.get(Brand, brand_id) is None:
-            return
-        s.add(Run(brand_id=brand_id, status="error", trigger="scheduled",
-                  error=reason, finished_at=utcnow()))
+            return None
+        run = Run(brand_id=brand_id, status=QUEUED, trigger=trigger)
+        s.add(run)
         s.commit()
+        return run.id
+
+
+def claim_queued(Session, run_id: int, take_slot: bool = True) -> str:
+    """Move a queued run forward. Returns:
+
+    "claimed" — it now holds the active slot as a pending run (execute it);
+    "busy"    — still waiting (the slot is taken, or take_slot is False);
+    "closed"  — it will not run: cancelled by the user, its brand's schedule
+                was removed while it waited, or the run/brand is gone.
+    """
+    with Session() as s:
+        run = s.get(Run, run_id)
+        if run is None or run.status != QUEUED:
+            return "closed"
+        brand = run.brand
+        reason = None
+        if run.cancel_requested:
+            reason = ""
+        elif run.trigger == "scheduled" and not brand.schedule:
+            reason = "the brand's schedule was removed while this run was waiting"
+        if reason is not None:
+            run.status = "cancelled"
+            run.error = reason
+            run.finished_at = utcnow()
+            s.commit()
+            return "closed"
+        if not take_slot:
+            return "busy"
+        run.active = 1
+        run.status = "pending"
+        run.config = brand_config(brand)
+        try:
+            s.commit()
+        except IntegrityError:  # another run still holds the slot
+            s.rollback()
+            return "busy"
+        return "claimed"
+
+
+def close_queued(Session, run_id: int, error: str) -> None:
+    """Give up on a queued run, leaving the reason on it."""
+    with Session() as s:
+        run = s.get(Run, run_id)
+        if run is None or run.status != QUEUED:
+            return
+        run.status = "error"
+        run.error = error
+        run.finished_at = utcnow()
+        s.commit()
+
+
+STATUS_RU = {"cancelled": "отменён", "error": "прерван с ошибкой"}
+
+
+def incomplete_notice(run: Run, lang: str = "en"):
+    """Text that must accompany any figures taken from a run that is not done;
+    None for a completed run. A cancelled or interrupted run has measured only
+    part of its matrix: without this line its report reads like a full one."""
+    if run.status == "done":
+        return None
+    if lang == "ru":
+        status = STATUS_RU.get(run.status, "ещё не завершён")
+        return (f"Неполный прогон — {status}: выполнено {run.done_calls} из "
+                f"{run.total_calls} запланированных вызовов. Цифры ниже относятся "
+                f"только к собранным ответам и не являются полным измерением.")
+    status = run.status if run.status in STATUS_RU else "not finished"
+    return (f"Incomplete run — {status}: {run.done_calls} of {run.total_calls} "
+            f"planned calls were made. The figures below cover only the answers "
+            f"collected and are not a full measurement.")
 
 
 def to_csv_row(a: Answer, domains: list, articles: dict, run_date: str = None) -> dict:
@@ -130,6 +230,14 @@ def execute_run(Session, run_id: int) -> None:
         run = s.get(Run, run_id)
         if run is None or run.status != "pending":
             return
+        if run.cancel_requested:
+            # Cancelled while queued (e.g. a scheduled tick waiting for the
+            # active slot): stop before any call, free the slot.
+            run.status = "cancelled"
+            run.active = None
+            run.finished_at = utcnow()
+            s.commit()
+            return
         cfg = run_config(run)
         run.status = "running"
         run.started_at = utcnow()
@@ -143,7 +251,7 @@ def execute_run(Session, run_id: int) -> None:
             old_models[MODEL_ENV[e]] = os.environ.get(MODEL_ENV[e])
             os.environ[MODEL_ENV[e]] = m
 
-    dead, error = set(), None
+    dead, error, cancelled = set(), None, False
     try:
         total = (sum(len(ncfg["queries"]) for ncfg in cfg["niches"].values())
                  * len(engines) * cfg["samples"])
@@ -158,6 +266,11 @@ def execute_run(Session, run_id: int) -> None:
                         continue
                     geo_applied = int(bool(cfg["geo"]) and gt.GEO_SUPPORTED[engine])
                     for sample in range(1, cfg["samples"] + 1):
+                        # Cancellation is honored between calls: the answer
+                        # in flight finishes, everything collected is kept.
+                        with Session() as s:
+                            if s.get(Run, run_id).cancel_requested:
+                                raise _Cancelled()
                         answer, status = None, "ok"
                         try:
                             answer = gt.ENGINES[engine]["fn"](query, cfg["geo"])
@@ -206,6 +319,8 @@ def execute_run(Session, run_id: int) -> None:
                         if engine in dead:
                             break
                         time.sleep(SLEEP_SEC)
+    except _Cancelled:
+        cancelled = True
     except Exception as e:  # noqa: BLE001 — surface on the run, don't crash the app
         error = str(e)
     finally:
@@ -216,7 +331,7 @@ def execute_run(Session, run_id: int) -> None:
                 os.environ[key] = val
         with Session() as s:
             run = s.get(Run, run_id)
-            run.status = "error" if error else "done"
+            run.status = "cancelled" if cancelled else ("error" if error else "done")
             run.error = error or ""
             run.active = None  # free the slot for the next run
             run.finished_at = utcnow()
