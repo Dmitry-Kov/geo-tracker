@@ -7,6 +7,7 @@ up as missing columns / zero hits.
 """
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -540,3 +541,45 @@ def test_cli_without_queries_py_explains_what_to_do(tmp_path):
                        text=True, cwd=tmp_path)
     assert p.returncode != 0
     assert "queries.example.py" in p.stderr and "Traceback" not in p.stderr
+
+
+# ---------------------------------------------------------------------------
+# Settings written in .env reach the app (the documented place for them)
+# ---------------------------------------------------------------------------
+
+def test_settings_from_dotenv_are_applied(tmp_path):
+    """`uvicorn app.main:app` with every setting in .env and none exported.
+
+    Runs in a subprocess: the settings are read while the module-level app is
+    built, and this process has load_env switched off (see conftest).
+    """
+    (tmp_path / ".env").write_text(
+        "APP_PASSWORD=pw-from-dotenv\n"
+        "APP_SECRET=secret-from-dotenv\n"
+        "APP_HTTPS_ONLY=1\n"
+        f"GEO_DB_PATH={tmp_path / 'from_dotenv.db'}\n", encoding="utf-8")
+    code = (
+        "import sys, json\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "import geo_tracker as gt\n"
+        f"gt.BASE_DIR = Path({str(tmp_path)!r})\n"      # where .env is looked up
+        "import app.main as m\n"
+        "from fastapi.testclient import TestClient\n"
+        "from starlette.middleware.sessions import SessionMiddleware\n"
+        "mw = [x for x in m.app.user_middleware if x.cls is SessionMiddleware][0]\n"
+        "with TestClient(m.app) as c:\n"
+        "    r = c.post('/login', data={'password': 'pw-from-dotenv'}, follow_redirects=False)\n"
+        "print(json.dumps({'login': r.status_code,\n"
+        "                  'cookie': r.headers.get('set-cookie', ''),\n"
+        "                  'secret': mw.kwargs.get('secret_key')}))\n")
+    clean = {k: v for k, v in os.environ.items()
+             if not k.startswith(("APP_", "GEO_DB_PATH"))}
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, cwd=tmp_path, env=clean)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout.strip().splitlines()[-1])
+    assert out["login"] == 303                           # APP_PASSWORD
+    assert "secure" in out["cookie"].lower()             # APP_HTTPS_ONLY
+    assert out["secret"] == "secret-from-dotenv"         # APP_SECRET
+    assert (tmp_path / "from_dotenv.db").exists()        # GEO_DB_PATH

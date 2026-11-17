@@ -175,6 +175,11 @@ def form_values(brand=None, form=None) -> dict:
 
 
 def create_app(db_path=None) -> FastAPI:
+    # .env first. Everything below takes its settings from the environment
+    # while the app is being built — the database path, the session key, the
+    # cookie flags. Loaded any later (it used to happen at startup), those
+    # settings silently fell back to their defaults when they came from .env.
+    gt.load_env()
     engine = make_engine(db_path)
     Session = make_session_factory(engine)
     sched, sync_schedule, load_schedules, stop_queue = make_scheduler(Session)
@@ -182,7 +187,6 @@ def create_app(db_path=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
-        gt.load_env()
         init_db(engine)
         # Before anything can start a run: a run left active by the previous
         # process is dead and would block every new one.
