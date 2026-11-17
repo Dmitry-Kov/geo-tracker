@@ -10,7 +10,7 @@
   </div>
 </div>
 
-{% set poll = False %}{% include "_progress.html" %}
+{% set poll = True %}{% set refresh = False %}{% include "_progress.html" %}
 <p class="mono small muted">
   trigger={{ run.trigger }}
   {% if run.started_at %} · started {{ run.started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC{% endif %}

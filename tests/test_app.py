@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -127,6 +127,27 @@ def test_progress_endpoint(client):
     assert "done" in r.text and "6/6" in r.text
 
 
+def test_run_page_follows_an_active_run_and_stops_when_it_ends(client):
+    brand_id = create_brand(client)
+    Session = client.app.state.Session
+    with Session() as s:
+        s.add(Run(brand_id=brand_id, status="running", active=1, total_calls=6))
+        s.commit()
+    poll = 'hx-get="/runs/1/progress"'
+    refresh = 'hx-get="/runs/1"'
+    assert poll in client.get("/runs/1").text            # the page starts polling itself
+    assert poll in client.get("/runs/1/progress").text   # and keeps polling while active
+
+    with Session() as s:
+        run = s.get(Run, 1)
+        run.status, run.active = "done", None
+        s.commit()
+    fragment = client.get("/runs/1/progress").text
+    assert poll not in fragment and refresh in fragment  # run over → load the results once
+    page = client.get("/runs/1").text
+    assert poll not in page and refresh not in page      # finished page: nothing to reload
+
+
 def test_one_run_at_a_time(client):
     brand_id = create_brand(client)
     Session = client.app.state.Session
@@ -165,6 +186,44 @@ def test_schedule_job_lifecycle(client):
                     data={**BRAND_FORM, "schedule": ""}, follow_redirects=False)
     assert r.status_code == 303
     assert sched.get_job(f"brand-{brand_id}") is None
+
+
+def test_cron_means_what_crontab_means_in_utc():
+    tuesday = datetime(2026, 11, 17, 7, 0, tzinfo=timezone.utc)
+
+    def next_fire(expr):
+        return scheduler.cron_trigger(expr).get_next_fire_time(None, tuesday)
+
+    monday = next_fire("0 9 * * 1")                      # crontab: 1 = Monday
+    assert monday.strftime("%A %H:%M") == "Monday 09:00"
+    assert monday.utcoffset() == timedelta(0)            # UTC, not the server's zone
+    assert next_fire("0 9 * * 0").strftime("%A") == "Sunday"
+    assert next_fire("0 9 * * 7").strftime("%A") == "Sunday"
+    assert next_fire("0 9 * * 6").strftime("%A") == "Saturday"
+    assert next_fire("0 9 * * mon").strftime("%A") == "Monday"   # names pass through
+    assert next_fire("30 4 * * *").strftime("%A %H:%M") == "Wednesday 04:30"
+
+    def weekdays(expr, n):
+        t, when, seen = scheduler.cron_trigger(expr), tuesday, []
+        for _ in range(n):
+            when = t.get_next_fire_time(when, when + timedelta(seconds=1))
+            seen.append(when.strftime("%a"))
+        return seen
+
+    assert weekdays("0 9 * * 1-5", 5) == ["Tue", "Wed", "Thu", "Fri", "Mon"]  # no weekend
+    assert weekdays("0 9 * * 0,3", 2) == ["Wed", "Sun"]
+    assert weekdays("0 9 * * 0-6", 3) == ["Tue", "Wed", "Thu"]   # every day
+
+    for bad in ("0 9 * * 8", "0 9 * * 5-1", "0 9 * *", "not a cron"):
+        with pytest.raises(ValueError):
+            scheduler.cron_trigger(bad)
+
+
+def test_scheduled_job_is_registered_in_utc_on_the_right_weekday(client):
+    brand_id = create_brand(client, schedule="0 9 * * 1")
+    job = client.app.state.scheduler.get_job(f"brand-{brand_id}")
+    assert job.next_run_time.strftime("%A %H:%M") == "Monday 09:00"
+    assert job.next_run_time.utcoffset() == timedelta(0)
 
 
 def test_delete_brand_cascades(client):

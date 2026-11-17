@@ -7,6 +7,7 @@ lands on a manual run waits for it to finish. A scheduled run that still
 cannot start after MAX_WAIT_SEC is recorded on the brand as a skipped run —
 never dropped silently.
 """
+import re
 import threading
 import time
 
@@ -18,6 +19,50 @@ from .runner import execute_run, record_skipped, start_run
 
 POLL_SEC = 5.0
 MAX_WAIT_SEC = 6 * 3600
+CRON_WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]  # cron: 0 = Sunday
+
+
+def _weekday_names(field: str) -> str:
+    """A crontab weekday field (0 or 7 = Sunday, 1 = Monday…) as day names.
+
+    APScheduler numbers weekdays from Monday = 0, so passing crontab numbers
+    through unchanged shifts every schedule by a day. Names mean the same in
+    both, so numeric fields are expanded to names; fields already written
+    with names are left as they are.
+    """
+    if field == "*" or re.search(r"[A-Za-z]", field):
+        return field
+    days = set()
+    for part in field.split(","):
+        span, _, step = part.partition("/")
+        step = int(step) if step else 1
+        if span == "*":
+            first, last = 0, 6
+        elif "-" in span:
+            first, last = (int(x) for x in span.split("-", 1))
+        else:
+            first = last = int(span)
+        if not (0 <= first <= last <= 7) or step < 1:
+            raise ValueError(f"invalid weekday field: {field!r} (use 0-7, 0 and 7 = Sunday)")
+        days.update(d % 7 for d in range(first, last + 1, step))
+    if len(days) == 7:
+        return "*"
+    return ",".join(CRON_WEEKDAYS[d] for d in sorted(days))
+
+
+def cron_trigger(schedule: str) -> CronTrigger:
+    """A standard 5-field crontab line as a trigger, evaluated in UTC.
+
+    Not CronTrigger.from_crontab: that reads the weekday numbers in
+    APScheduler's own numbering and, without an explicit timezone, uses the
+    server's local one — "0 9 * * 1" would fire on Tuesdays at 09:00 local.
+    """
+    fields = schedule.split()
+    if len(fields) != 5:
+        raise ValueError("expected 5 fields: minute hour day month weekday")
+    minute, hour, day, month, weekday = fields
+    return CronTrigger(minute=minute, hour=hour, day=day, month=month,
+                       day_of_week=_weekday_names(weekday), timezone="UTC")
 
 
 def make_scheduler(Session):
@@ -53,7 +98,7 @@ def make_scheduler(Session):
         if schedule:
             # misfire_grace_time=None: a tick delayed behind other brands in
             # the worker pool still runs instead of being discarded as late.
-            sched.add_job(scheduled_run, CronTrigger.from_crontab(schedule),
+            sched.add_job(scheduled_run, cron_trigger(schedule),
                           args=[brand_id], id=job_id, replace_existing=True,
                           misfire_grace_time=None, coalesce=True, max_instances=1)
 

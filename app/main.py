@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
                                RedirectResponse)
@@ -32,7 +31,7 @@ from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 from .db import Answer, Brand, Run, init_db, make_engine, make_session_factory
 from .runner import execute_run, recover_interrupted, run_rows, start_run
-from .scheduler import make_scheduler
+from .scheduler import cron_trigger, make_scheduler
 
 APP_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(APP_DIR / "templates"))
@@ -125,7 +124,7 @@ def parse_brand_form(form) -> tuple:
         return {}, "samples must be >= 1"
     if schedule:
         try:
-            CronTrigger.from_crontab(schedule)
+            cron_trigger(schedule)
         except ValueError as e:
             return {}, f"invalid cron schedule: {e}"
     cfg = {
@@ -377,7 +376,7 @@ def create_app(db_path=None) -> FastAPI:
             if run is None:
                 raise HTTPException(404, "run not found")
         return TEMPLATES.TemplateResponse(request, "_progress.html",
-                                          {"run": run, "poll": True})
+                                          {"run": run, "poll": True, "refresh": True})
 
     @app.get("/answers/{answer_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     def answer_receipt(request: Request, answer_id: str):
