@@ -51,7 +51,7 @@ def env(monkeypatch):
     for e in gt.ENGINES:
         monkeypatch.setenv(gt.ENGINES[e]["env"], "test-key")
         monkeypatch.setitem(gt.ENGINES[e], "fn", fake_answer)
-    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET"):
+    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gt, "load_env", lambda: None)
     monkeypatch.setattr(runner, "SLEEP_SEC", 0)
@@ -252,6 +252,69 @@ def test_auth_password_flow(tmp_path, env):
         assert c.get("/").status_code == 200
         c.post("/logout")
         assert c.get("/", follow_redirects=False).status_code == 307
+
+
+def test_login_rate_limit_refuses_after_five_failures(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl.db")
+    with TestClient(application) as c:
+        for _ in range(5):
+            assert c.post("/login", data={"password": "wrong"}).status_code == 401
+        # even the CORRECT password is refused while the address is blocked
+        r = c.post("/login", data={"password": "secret"})
+        assert r.status_code == 429
+        assert "Too many failed attempts" in r.text
+        assert int(r.headers["retry-after"]) > 0
+        assert c.get("/", follow_redirects=False).status_code == 307
+
+
+def test_login_rate_limit_window_expires(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl-window.db")
+    with TestClient(application) as c:
+        now = [0.0]
+        application.state.login_limiter.clock = lambda: now[0]
+        for _ in range(5):
+            c.post("/login", data={"password": "wrong"})
+        assert c.post("/login", data={"password": "secret"}).status_code == 429
+        now[0] = 901.0  # 15 minutes + 1s: the failures left the window
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+
+
+def test_login_success_resets_failure_count(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl-reset.db")
+    with TestClient(application) as c:
+        for _ in range(4):
+            c.post("/login", data={"password": "wrong"})
+        assert c.post("/login", data={"password": "secret"},
+                      follow_redirects=False).status_code == 303
+        c.post("/logout")
+        for _ in range(4):
+            assert c.post("/login", data={"password": "wrong"}).status_code == 401
+        # without the reset these would be failures 5..8 → blocked
+        assert c.post("/login", data={"password": "secret"},
+                      follow_redirects=False).status_code == 303
+
+
+def test_session_cookie_secure_when_https_only(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    env.setenv("APP_HTTPS_ONLY", "1")
+    application = create_app(db_path=tmp_path / "https.db")
+    with TestClient(application) as c:
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_session_cookie_not_secure_by_default(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "http.db")
+    with TestClient(application) as c:
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "secure" not in r.headers["set-cookie"].lower()
 
 
 def test_settings_shows_key_status_not_values(client):
