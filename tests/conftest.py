@@ -23,3 +23,11 @@ queries.NICHES = {
 queries.BRAND_ALIASES = {"example.com": ["Example Brand"]}
 queries.ARTICLES = {}
 sys.modules["queries"] = queries
+
+# Tests never read the developer's real .env: it holds live API keys and
+# service settings, and both the CLI (cmd_run) and the service (create_app)
+# load it on their own. The one test of .env loading runs in a subprocess
+# against its own temporary .env.
+import geo_tracker  # noqa: E402 — after the fake `queries` is installed
+
+geo_tracker.load_env = lambda: None

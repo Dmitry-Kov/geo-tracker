@@ -7,6 +7,7 @@ up as missing columns / zero hits.
 """
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -51,7 +52,7 @@ def env(monkeypatch):
     for e in gt.ENGINES:
         monkeypatch.setenv(gt.ENGINES[e]["env"], "test-key")
         monkeypatch.setitem(gt.ENGINES[e], "fn", fake_answer)
-    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET"):
+    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gt, "load_env", lambda: None)
     monkeypatch.setattr(runner, "SLEEP_SEC", 0)
@@ -252,6 +253,69 @@ def test_auth_password_flow(tmp_path, env):
         assert c.get("/").status_code == 200
         c.post("/logout")
         assert c.get("/", follow_redirects=False).status_code == 307
+
+
+def test_login_rate_limit_refuses_after_five_failures(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl.db")
+    with TestClient(application) as c:
+        for _ in range(5):
+            assert c.post("/login", data={"password": "wrong"}).status_code == 401
+        # even the CORRECT password is refused while the address is blocked
+        r = c.post("/login", data={"password": "secret"})
+        assert r.status_code == 429
+        assert "Too many failed attempts" in r.text
+        assert int(r.headers["retry-after"]) > 0
+        assert c.get("/", follow_redirects=False).status_code == 307
+
+
+def test_login_rate_limit_window_expires(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl-window.db")
+    with TestClient(application) as c:
+        now = [0.0]
+        application.state.login_limiter.clock = lambda: now[0]
+        for _ in range(5):
+            c.post("/login", data={"password": "wrong"})
+        assert c.post("/login", data={"password": "secret"}).status_code == 429
+        now[0] = 901.0  # 15 minutes + 1s: the failures left the window
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+
+
+def test_login_success_resets_failure_count(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "rl-reset.db")
+    with TestClient(application) as c:
+        for _ in range(4):
+            c.post("/login", data={"password": "wrong"})
+        assert c.post("/login", data={"password": "secret"},
+                      follow_redirects=False).status_code == 303
+        c.post("/logout")
+        for _ in range(4):
+            assert c.post("/login", data={"password": "wrong"}).status_code == 401
+        # without the reset these would be failures 5..8 → blocked
+        assert c.post("/login", data={"password": "secret"},
+                      follow_redirects=False).status_code == 303
+
+
+def test_session_cookie_secure_when_https_only(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    env.setenv("APP_HTTPS_ONLY", "1")
+    application = create_app(db_path=tmp_path / "https.db")
+    with TestClient(application) as c:
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "secure" in r.headers["set-cookie"].lower()
+
+
+def test_session_cookie_not_secure_by_default(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "http.db")
+    with TestClient(application) as c:
+        r = c.post("/login", data={"password": "secret"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "secure" not in r.headers["set-cookie"].lower()
 
 
 def test_settings_shows_key_status_not_values(client):
@@ -477,3 +541,45 @@ def test_cli_without_queries_py_explains_what_to_do(tmp_path):
                        text=True, cwd=tmp_path)
     assert p.returncode != 0
     assert "queries.example.py" in p.stderr and "Traceback" not in p.stderr
+
+
+# ---------------------------------------------------------------------------
+# Settings written in .env reach the app (the documented place for them)
+# ---------------------------------------------------------------------------
+
+def test_settings_from_dotenv_are_applied(tmp_path):
+    """`uvicorn app.main:app` with every setting in .env and none exported.
+
+    Runs in a subprocess: the settings are read while the module-level app is
+    built, and this process has load_env switched off (see conftest).
+    """
+    (tmp_path / ".env").write_text(
+        "APP_PASSWORD=pw-from-dotenv\n"
+        "APP_SECRET=secret-from-dotenv\n"
+        "APP_HTTPS_ONLY=1\n"
+        f"GEO_DB_PATH={tmp_path / 'from_dotenv.db'}\n", encoding="utf-8")
+    code = (
+        "import sys, json\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "import geo_tracker as gt\n"
+        f"gt.BASE_DIR = Path({str(tmp_path)!r})\n"      # where .env is looked up
+        "import app.main as m\n"
+        "from fastapi.testclient import TestClient\n"
+        "from starlette.middleware.sessions import SessionMiddleware\n"
+        "mw = [x for x in m.app.user_middleware if x.cls is SessionMiddleware][0]\n"
+        "with TestClient(m.app) as c:\n"
+        "    r = c.post('/login', data={'password': 'pw-from-dotenv'}, follow_redirects=False)\n"
+        "print(json.dumps({'login': r.status_code,\n"
+        "                  'cookie': r.headers.get('set-cookie', ''),\n"
+        "                  'secret': mw.kwargs.get('secret_key')}))\n")
+    clean = {k: v for k, v in os.environ.items()
+             if not k.startswith(("APP_", "GEO_DB_PATH"))}
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                       text=True, cwd=tmp_path, env=clean)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout.strip().splitlines()[-1])
+    assert out["login"] == 303                           # APP_PASSWORD
+    assert "secure" in out["cookie"].lower()             # APP_HTTPS_ONLY
+    assert out["secret"] == "secret-from-dotenv"         # APP_SECRET
+    assert (tmp_path / "from_dotenv.db").exists()        # GEO_DB_PATH
