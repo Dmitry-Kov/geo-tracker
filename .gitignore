@@ -13,6 +13,9 @@ dashboard*.html
 manual_*.csv
 geo_report_*.docx
 
+# том Docker-деплоя (GEO_DATA_DIR по умолчанию): БД, WAL и бэкапы
+data/
+
 # python
 __pycache__/
 *.pyc
@@ -24,3 +27,7 @@ __pycache__/
 
 # локальные файлы Qwen (скриншоты проверок)
 .qwen/
+
+# локальные конфиги OpenCode
+opencode.json
+.opencode/
