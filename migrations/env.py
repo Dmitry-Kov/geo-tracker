@@ -15,7 +15,11 @@ from app.db import Base, make_engine  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: this file also runs inside the service
+    # at startup. fileConfig's default disables every logger that already
+    # exists — uvicorn's included — and the server would then run without a
+    # startup line, access log or error tracebacks.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

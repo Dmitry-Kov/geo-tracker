@@ -2,6 +2,7 @@
 """Startup migrations: pre-Alembic DBs adopted without data loss, empty DBs
 get the schema, repeat startups change nothing, and the baseline matches
 the create_all schema of pre-Alembic main (semantically, via inspector)."""
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -143,3 +144,25 @@ def test_baseline_matches_create_all_schema(tmp_path):
         uq_a = sorted(tuple(u["column_names"]) for u in ia.get_unique_constraints(t))
         uq_b = sorted(tuple(u["column_names"]) for u in ib.get_unique_constraints(t))
         assert uq_a == uq_b, t
+
+
+def test_migrating_does_not_silence_the_servers_loggers(tmp_path):
+    """Alembic's env.py configures logging from alembic.ini. Done the default
+    way that disables every logger that already exists — uvicorn's among
+    them — so a start that runs a migration would serve requests with no
+    startup line, no access log and no error tracebacks."""
+    existing = [logging.getLogger(name) for name in
+                ("uvicorn.error", "uvicorn.access", "geo_tracker.test_probe")]
+    for lg in existing:
+        lg.disabled = False
+    with TestClient(create_app(db_path=tmp_path / "fresh.db"), base_url="http://localhost"):
+        pass                                   # empty DB → the baseline runs
+    assert [lg.name for lg in existing if lg.disabled] == []
+
+
+def test_database_path_with_a_percent_sign(tmp_path):
+    # the URL goes through alembic's ini-style config, where % is special
+    folder = tmp_path / "100%data"
+    folder.mkdir()
+    with TestClient(create_app(db_path=folder / "t.db"), base_url="http://localhost") as c:
+        assert c.get("/").status_code == 200

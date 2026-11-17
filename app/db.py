@@ -157,7 +157,8 @@ def migrate_database(engine) -> None:
 
     cfg = Config(str(BASE_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BASE_DIR / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", str(engine.url))
+    # % is the interpolation character of alembic's ini-style config
+    cfg.set_main_option("sqlalchemy.url", str(engine.url).replace("%", "%%"))
     heads = set(ScriptDirectory.from_config(cfg).get_heads())
     with engine.connect() as conn:
         tables = set(inspect(conn).get_table_names())
