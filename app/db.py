@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import (JSON, DateTime, ForeignKey, Integer, String, Text,
                         create_engine, inspect)
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column,
                             relationship, sessionmaker)
 
@@ -110,7 +111,10 @@ class ArticleHit(Base):
 
 def make_engine(db_path: Path = None):
     path = Path(db_path or os.environ.get("GEO_DB_PATH") or BASE_DIR / "geo_tracker.db")
-    return create_engine(f"sqlite:///{path}",
+    # URL.create, not an f-string URL: a URL parsed from text is
+    # percent-decoded by newer SQLAlchemy, so a path like ".../100%data/"
+    # would silently point somewhere else.
+    return create_engine(URL.create("sqlite", database=str(path)),
                          connect_args={"check_same_thread": False})
 
 
@@ -157,8 +161,6 @@ def migrate_database(engine) -> None:
 
     cfg = Config(str(BASE_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BASE_DIR / "migrations"))
-    # % is the interpolation character of alembic's ini-style config
-    cfg.set_main_option("sqlalchemy.url", str(engine.url).replace("%", "%%"))
     heads = set(ScriptDirectory.from_config(cfg).get_heads())
     with engine.connect() as conn:
         tables = set(inspect(conn).get_table_names())
@@ -168,6 +170,11 @@ def migrate_database(engine) -> None:
     path = Path(engine.url.database) if engine.url.database else None
     if path is not None and path.exists() and path.stat().st_size > 0:
         backup_database(path)
-    if tables and "alembic_version" not in tables:
-        command.stamp(cfg, BASELINE_REVISION)
-    command.upgrade(cfg, "head")
+    # Alembic runs on this engine's own connection (see migrations/env.py)
+    # rather than on a URL rebuilt from text: no second engine, and no path
+    # that has to survive being written out and parsed back.
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        if tables and "alembic_version" not in tables:
+            command.stamp(cfg, BASELINE_REVISION)
+        command.upgrade(cfg, "head")
