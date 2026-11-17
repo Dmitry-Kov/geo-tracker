@@ -133,6 +133,7 @@ def test_compare_page_renders_significant_and_method(client, env):
     rb = run_once(client, bid)               # all hit → share 100
     page = client.get(f"/brands/{bid}/compare?a={ra}&b={rb}").text
     assert "significant (up)" in page
+    assert "&lt;0.001" in page and ">0.000<" not in page   # a tiny p is not shown as zero
     assert "Holm correction" in page
     assert "Grounded fraction" in page
     assert "Sensitivity" in page
@@ -146,3 +147,69 @@ def test_compare_page_insufficient_below_floor(client):
     ra, rb = run_once(client, bid), run_once(client, bid)
     page = client.get(f"/brands/{bid}/compare?a={ra}&b={rb}").text
     assert "insufficient queries" in page
+
+
+# ---------------------------------------------------------------------------
+# History: breaks in comparability are marked, figures of done runs are cached
+# ---------------------------------------------------------------------------
+
+def history_data(page):
+    m = re.search(r"const HISTORY = (\{.*?\});\n", page, re.S)
+    return json.loads(m.group(1))
+
+
+def edit_brand(client, brand_id, **changes):
+    form = {"name": "DynBrand", "domains": "brand.io", "niche_key": "main",
+            "niche_title": "Main", "primary_domain": "brand.io", "queries": "q1\nq2",
+            "geo": "UZ", "engines": ["gemini"], "samples": "1", "schedule": "",
+            "articles": "", "aliases": "", "model_gemini": "", "model_perplexity": "",
+            "model_openai": "", **changes}
+    r = client.post(f"/brands/{brand_id}", data=form, follow_redirects=False)
+    assert r.status_code == 303, r.text
+
+
+def test_history_marks_runs_not_comparable_with_the_previous_one(client):
+    brand_id = make_brand(client, "q1\nq2")
+    run_once(client, brand_id)                                   # run 1
+    run_once(client, brand_id)                                   # run 2: same basis
+    edit_brand(client, brand_id, aliases='{"brand.io": ["Brand*"]}')
+    run_once(client, brand_id)                                   # run 3: aliases changed
+    edit_brand(client, brand_id, aliases='{"brand.io": ["Brand*"]}', geo="")
+    run_once(client, brand_id)                                   # run 4: geo changed
+
+    page = client.get(f"/brands/{brand_id}").text
+    series = history_data(page)["main"]["domains"]["brand.io"]
+    assert series["run_ids"] == [1, 2, 3, 4]
+    assert series["breaks"] == ["", "", "aliases changed", "geo UZ → —"]
+    assert page.count("not comparable</span> aliases changed") == 1
+    assert "not comparable</span> geo UZ → —" in page
+    assert "breaks[c.p1DataIndex]" in page                       # the chart dashes that segment
+
+
+def test_history_figures_of_done_runs_are_computed_once(client, env):
+    from app import dynamics
+    brand_id = make_brand(client, "q1\nq2")
+    run_once(client, brand_id)
+    run_once(client, brand_id)
+    calls = []
+    real = dynamics.share_ci_rows
+    env.setattr(dynamics, "share_ci_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    first = client.get(f"/brands/{brand_id}").text
+    assert len(calls) == 2                                       # one per done run
+    again = client.get(f"/brands/{brand_id}").text
+    assert len(calls) == 2                                       # served from the cache
+    assert history_data(first) == history_data(again)
+
+    run_once(client, brand_id)                                   # a new run is computed, once
+    client.get(f"/brands/{brand_id}")
+    assert len(calls) == 3
+
+
+def test_queued_run_blocks_run_now(client):
+    brand_id = make_brand(client, "q1\nq2")
+    assert "disabled" not in re.search(r"<button[^>]*>Run now</button>", client.get(f"/brands/{brand_id}").text).group(0)
+    with client.app.state.Session() as s:
+        s.add(Run(brand_id=brand_id, status="queued", trigger="scheduled"))
+        s.commit()
+    assert "disabled" in re.search(r"<button[^>]*>Run now</button>", client.get(f"/brands/{brand_id}").text).group(0)

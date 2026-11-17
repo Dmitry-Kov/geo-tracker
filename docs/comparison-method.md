@@ -89,6 +89,13 @@ For n ≥ 30, a **seeded paired sign-flip permutation test** on the `d_q`:
   rows — the same evidence contract as the seeded bootstrap). Zero
   differences flip to zero (ties handled).
 - Two-sided p with add-one correction: `p = (1 + #{T_perm ≥ T_obs})/(1 + B)`.
+- **The count is exact.** Per-query rates are ratios of small counts, so many
+  re-signed sums are *exactly* equal to the observed one, and those ties
+  belong in `#{T_perm ≥ T_obs}`. Summed as floats they differ in the last
+  bit and drop out, which can only lower p: on data where a query has a
+  different number of grounded answers in the two runs, p came out too low
+  in 127 of 150 trials, by up to 0.18. The differences are kept as exact
+  rationals and summed as integers on a common denominator.
   All `d_q = 0` → `p = 1`.
 
 **Multiple comparisons (correction A).** With many pairs, an uncorrected
@@ -152,8 +159,17 @@ On the brand page, per niche × domain:
 - **Table** of `done` runs (oldest → newest): run date, share, 95% CI and
   method via `sov_stats.share_ci` over that run's own ok grounded rows
   (`run_rows`), `nq`, `n`. Non-`done` runs are not in this table.
-- **Chart**: share over run date with the CI band. **Chart.js is vendored
-  in `app/static/`** (like htmx), not loaded from a CDN.
+- **Chart**: share over run date (the CI is in the table). **Chart.js is
+  vendored in `app/static/`** (like htmx), not loaded from a CDN.
+- **Breaks in comparability are marked.** A run whose matching-rules
+  version, geo or aliases for that domain differ from the previous run of
+  the series is flagged «not comparable» in the table with the reason, and
+  the chart draws the segment leading to it dashed and grey. These are the
+  conditions the comparison gates on (C); without the mark the chart would
+  draw a change of measurement as a trend — adding one alias moved a domain
+  from 0% to 100% in the test data.
+- The figures of a done run are computed once and cached: the run and its
+  snapshot never change.
 - **Comparison** control: pick run A and run B (both `done`) → section 6.
 
 ## 8. Reproducibility, dependencies, scope

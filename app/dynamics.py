@@ -16,7 +16,9 @@ family of niche rows + per-domain overall rows (corrections A, D).
 """
 from __future__ import annotations
 
+import math
 import random
+from fractions import Fraction
 
 from sov_stats import (hit, is_grounded, share_ci, sov_stats,
                        DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES)
@@ -65,7 +67,7 @@ def pair_diffs(rates_a: dict, rates_b: dict) -> dict:
     queries unique to each run, and the pooled subset shares for reference
     (NOT the tested change — correction B)."""
     diffs = []
-    only_a = only_b = 0
+    only_a = only_b = no_common_engine = 0
     ah = an = bh = bn = 0
     for obs, eng_a in rates_a.items():
         eng_b = rates_b.get(obs)
@@ -75,13 +77,17 @@ def pair_diffs(rates_a: dict, rates_b: dict) -> dict:
         common = set(eng_a) & set(eng_b)
         if not common:
             # present in both runs but no common engine for this query:
-            # not a common query, and not "only in A" either — just excluded
+            # not a common query, and not "only in A" either — counted apart
+            no_common_engine += 1
             continue
         ha = sum(eng_a[e][0] for e in common)
         na = sum(eng_a[e][1] for e in common)
         hb = sum(eng_b[e][0] for e in common)
         nb = sum(eng_b[e][1] for e in common)
-        diffs.append(hb / nb - ha / na)
+        # Exact rationals, not floats: the permutation test below counts how
+        # often a re-signed sum is at least as large as the observed one, and
+        # a tie lost to rounding makes the p-value too small.
+        diffs.append(Fraction(hb, nb) - Fraction(ha, na))
         ah += ha; an += na; bh += hb; bn += nb
     only_b = sum(1 for obs in rates_b if obs not in rates_a)
     return {
@@ -89,6 +95,7 @@ def pair_diffs(rates_a: dict, rates_b: dict) -> dict:
         "n_common": len(diffs),
         "only_a": only_a,
         "only_b": only_b,
+        "no_common_engine": no_common_engine,
         "pooled_a": (ah / an) if an else None,
         "pooled_b": (bh / bn) if bn else None,
     }
@@ -99,20 +106,33 @@ def paired_pvalue(diffs: list, B: int = PERM_B, seed: int = PERM_SEED) -> float:
 
     Statistic |sum(d)| (equivalent to |mean(d)| for fixed n). Under the null
     each difference's sign is exchangeable; B seeded sign-flips give the
-    reference distribution. Add-one correction. All-zero → p=1."""
+    reference distribution. Add-one correction. All-zero → p=1.
+
+    The arithmetic is exact. Per-query rates are ratios of small counts, so
+    many re-signed sums are *exactly* equal to the observed one, and those
+    ties belong in the count. Summed as floats they differ in the last bit
+    and drop out, which only ever lowers p — on realistic data by up to 0.18.
+    The differences are therefore put on a common denominator and summed as
+    integers. Floats are accepted and read as the nearest simple fraction.
+    """
     n = len(diffs)
     if n == 0:
         return 1.0
-    obs = abs(sum(diffs))
+    exact = [d if isinstance(d, Fraction) else Fraction(d).limit_denominator(10 ** 6)
+             for d in diffs]
+    scale = math.lcm(*(d.denominator for d in exact))
+    ints = [int(d * scale) for d in exact]
+    obs = abs(sum(ints))
     if obs == 0:
         return 1.0
+    moving = [(q, v) for q, v in enumerate(ints) if v]  # zeros never change a sum
     rng = random.Random(seed)
     ge = 0
     for _ in range(B):
-        bits = rng.getrandbits(n)
-        s = 0
-        for q in range(n):
-            s += diffs[q] if (bits >> q) & 1 else -diffs[q]
+        bits = rng.getrandbits(n)  # one bit per query, zeros included: the
+        s = 0                      # draw does not depend on which are zero
+        for q, v in moving:
+            s += v if (bits >> q) & 1 else -v
         if abs(s) >= obs:
             ge += 1
     return (1 + ge) / (1 + B)
@@ -190,6 +210,8 @@ def compare(cfg_a: dict, rows_a: list, cfg_b: dict, rows_b: list, *,
 
     domains = sorted(set(cfg_a["domains"]) | set(cfg_b["domains"]))
     niches = sorted(set(cfg_a["niches"]) & set(cfg_b["niches"]))
+    base["niches_only_a"] = sorted(set(cfg_a["niches"]) - set(cfg_b["niches"]))
+    base["niches_only_b"] = sorted(set(cfg_b["niches"]) - set(cfg_a["niches"]))
     aliases_a, aliases_b = cfg_a.get("aliases", {}), cfg_b.get("aliases", {})
 
     pairs = []
@@ -212,6 +234,7 @@ def compare(cfg_a: dict, rows_a: list, cfg_b: dict, rows_b: list, *,
             n = pd["n_common"]
             row = {"domain": d, "niche": niche, "overall": niche is None,
                    "n_common": n, "only_a": pd["only_a"], "only_b": pd["only_b"],
+                   "no_common_engine": pd["no_common_engine"],
                    "pooled_a": pd["pooled_a"], "pooled_b": pd["pooled_b"]}
             if n < MIN_COMMON:
                 row["verdict"] = "insufficient"
@@ -220,7 +243,7 @@ def compare(cfg_a: dict, rows_a: list, cfg_b: dict, rows_b: list, *,
                 row["adj_p"] = None
             else:
                 mean_d = sum(pd["diffs"]) / n
-                row["delta_pp"] = round(100.0 * mean_d, 1)
+                row["delta_pp"] = round(float(100 * mean_d), 1)
                 row["direction"] = "up" if mean_d > 0 else ("down" if mean_d < 0 else "flat")
                 row["discordant"] = sum(1 for x in pd["diffs"] if x != 0)
                 row["raw_p"] = paired_pvalue(pd["diffs"], B=B, seed=seed)
@@ -248,3 +271,26 @@ def share_ci_rows(rows: list, domains: list, niches) -> dict:
     """Grounded-channel share_ci per niche × domain (audit channel), via the
     guaranteed sov_stats estimator."""
     return sov_stats(rows, domains, niches, grounded=True)
+
+
+def basis(cfg: dict, domain: str) -> tuple:
+    """What a figure for this domain was measured under, beyond the answers
+    themselves: matching-rules version, geo, and the domain's aliases. Two
+    runs with different bases are not comparable for that domain — the same
+    conditions the comparison gates on."""
+    return (_rules_version(cfg), cfg.get("geo") or "",
+            tuple(sorted(cfg.get("aliases", {}).get(domain, []))))
+
+
+def basis_change(prev: tuple, cur: tuple) -> str:
+    """Why a history point is not comparable with the one before it ("" if it is)."""
+    if prev is None or prev == cur:
+        return ""
+    reasons = []
+    if prev[0] != cur[0]:
+        reasons.append(f"matching rules v{prev[0]} → v{cur[0]}")
+    if prev[1] != cur[1]:
+        reasons.append(f"geo {prev[1] or '—'} → {cur[1] or '—'}")
+    if prev[2] != cur[2]:
+        reasons.append("aliases changed")
+    return "; ".join(reasons)

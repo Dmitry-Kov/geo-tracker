@@ -204,21 +204,47 @@ def _run_label(run) -> str:
     return f"#{run.id} · {when}"
 
 
-def _brand_history(brand, runs) -> tuple:
+def _run_history_point(run, cache: dict) -> tuple:
+    """(stats, day, cfg) of one done run for the history block.
+
+    A done run never changes — its answers and its config snapshot are fixed
+    — so its figures are computed once. Recomputing them for every run on
+    every view of the brand page costs seconds per run on large query sets.
+    Keyed by finished_at as well: SQLite may reuse a deleted run's id."""
+    key = (run.id, run.finished_at)
+    if cache is not None and key in cache:
+        return cache[key]
+    cfg, rows = run_rows(run)
+    stats = dynamics.share_ci_rows(rows, cfg["domains"], cfg["niches"])
+    day = rows[0]["run_date"] if rows else (
+        run.started_at.strftime("%Y-%m-%d") if run.started_at else f"run {run.id}")
+    point = (stats, day, cfg)
+    if cache is not None:
+        cache[key] = point
+    return point
+
+
+def _brand_history(brand, runs, cache: dict = None) -> tuple:
     """Per niche × domain history over DONE runs only, each read through its
     own snapshot (run_rows). Non-done runs never contribute figures. Returns
-    (history_json for tables+charts, done_list for the compare selectors)."""
+    (history_json for tables+charts, done_list for the compare selectors).
+
+    Each point carries "break": why it is not comparable with the previous
+    point of its series (rules version, geo or the domain's aliases changed),
+    or "". The comparison refuses such pairs; the history must not draw them
+    as a trend either."""
     done = sorted((r for r in runs if r.status == "done"), key=lambda r: r.id)
     hist: dict = {}
+    last_basis: dict = {}
     for r in done:
-        cfg, rows = run_rows(r)
-        stats = dynamics.share_ci_rows(rows, cfg["domains"], cfg["niches"])
-        day = rows[0]["run_date"] if rows else (
-            r.started_at.strftime("%Y-%m-%d") if r.started_at else f"run {r.id}")
+        stats, day, cfg = _run_history_point(r, cache)
         for niche, by_dom in stats.items():
             for d, st in by_dom.items():
+                cur = dynamics.basis(cfg, d)
+                why = dynamics.basis_change(last_basis.get((niche, d)), cur)
+                last_basis[(niche, d)] = cur
                 hist.setdefault(niche, {}).setdefault(d, []).append(
-                    {"run_id": r.id, "label": f"#{r.id} · {day}", **st})
+                    {"run_id": r.id, "label": f"#{r.id} · {day}", "break": why, **st})
     history_json = {}
     for niche, by_dom in hist.items():
         title = (brand.niches.get(niche) or {}).get("title", niche)
@@ -230,6 +256,7 @@ def _brand_history(brand, runs) -> tuple:
                 "nq": [p["n_queries"] for p in pts],
                 "n": [p["n_samples"] for p in pts],
                 "method": [p["method"] for p in pts],
+                "breaks": [p["break"] for p in pts],
                 "run_ids": [p["run_id"] for p in pts]}
             for d, pts in by_dom.items()}}
     done_list = [{"id": r.id, "label": _run_label(r)} for r in done]
@@ -246,6 +273,7 @@ def create_app(db_path=None) -> FastAPI:
     Session = make_session_factory(engine)
     sched, sync_schedule, load_schedules, stop_queue = make_scheduler(Session)
     login_limiter = LoginLimiter()
+    history_cache: dict = {}   # figures of done runs, see _run_history_point
 
     @asynccontextmanager
     async def lifespan(app):
@@ -374,8 +402,8 @@ def create_app(db_path=None) -> FastAPI:
             if b is None:
                 raise HTTPException(404, "brand not found")
             runs = list(b.runs)
-            busy = any(r.status in ("pending", "running", WAITING) for r in runs)
-            history_json, done_list = _brand_history(b, runs)
+            busy = any(r.status in WAITING for r in runs)
+            history_json, done_list = _brand_history(b, runs, history_cache)
             return render(request, "brand_form.html",
                           {"brand": b, "values": form_values(brand=b), "error": "",
                            "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy,

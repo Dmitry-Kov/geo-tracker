@@ -402,7 +402,10 @@ the service does not need it.
   dashboard or DOCX (en/ru) per run.
 - **Dynamics between runs**: the brand page shows a per niche × domain
   history (table + Chart.js graph, vendored locally) over **done** runs,
-  each read from its own config snapshot. A comparison of two done runs
+  each read from its own config snapshot. A run that is not comparable with
+  the one before it — the matching rules, the geo or the domain's aliases
+  changed — is flagged in the table and reached by a dashed segment on the
+  chart: that step is a change of measurement, not of visibility. A comparison of two done runs
   pairs queries at the query × engine level on the grounded channel and
   reports, per pair, whether the change is **significant** or **within
   noise**: a seeded sign-flip permutation test (B=10000, seed=0, α=0.05)

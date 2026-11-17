@@ -275,3 +275,84 @@ def test_insufficient_shows_no_number():
     row = find(res["pairs"], d, "n")
     assert row["verdict"] == "insufficient"
     assert row["delta_pp"] is None and row["raw_p"] is None and row["adj_p"] is None
+
+
+# ---------------------------------------------------------------------------
+# The permutation count is exact: ties must not be lost to float rounding
+# ---------------------------------------------------------------------------
+
+def _reference_pvalue(fractions, B, seed):
+    """The same seeded sign-flips, summed as exact rationals."""
+    import random
+    from fractions import Fraction
+    n = len(fractions)
+    obs = abs(sum(fractions))
+    if n == 0 or obs == 0:
+        return 1.0
+    rng = random.Random(seed)
+    ge = 0
+    for _ in range(B):
+        bits = rng.getrandbits(n)
+        total = Fraction(0)
+        for q in range(n):
+            total += fractions[q] if (bits >> q) & 1 else -fractions[q]
+        if abs(total) >= obs:
+            ge += 1
+    return (1 + ge) / (1 + B)
+
+
+def _mixed_denominator_diffs(rng, n=30):
+    from fractions import Fraction
+    out = []
+    for _ in range(n):
+        na, nb = rng.choice((2, 3)), rng.choice((2, 3))   # e.g. one engine went ungrounded
+        p = rng.betavariate(0.5, 2.0)
+        ha = sum(rng.random() < p for _ in range(na))
+        hb = sum(rng.random() < p for _ in range(nb))
+        out.append(Fraction(hb, nb) - Fraction(ha, na))
+    return out
+
+
+def test_pvalue_counts_ties_exactly():
+    """Summed as floats, re-signed sums that equal the observed one differ in
+    the last bit and drop out of the count: p came out too low in 127 of 150
+    such cases (by up to 0.18) and never too high."""
+    import random
+    rng = random.Random(7)
+    for _ in range(40):
+        fr = _mixed_denominator_diffs(rng)
+        expected = _reference_pvalue(fr, 1000, 0)
+        assert dy.paired_pvalue(fr, B=1000, seed=0) == expected
+        # the same differences handed over as floats give the same answer
+        as_floats = [f.numerator / f.denominator for f in fr]
+        assert dy.paired_pvalue(as_floats, B=1000, seed=0) == expected
+
+
+def test_pair_diffs_are_exact_rationals():
+    from fractions import Fraction
+    ra = {("n", "q1"): {"gemini": (1, 3)}, ("n", "q2"): {"gemini": (2, 3), "openai": (1, 2)}}
+    rb = {("n", "q1"): {"gemini": (2, 3)}, ("n", "q2"): {"gemini": (1, 3), "openai": (1, 2)}}
+    pd = dy.pair_diffs(ra, rb)
+    assert pd["diffs"] == [Fraction(1, 3), Fraction(-1, 5)]
+    assert all(isinstance(d, Fraction) for d in pd["diffs"])
+
+
+def test_queries_without_a_common_engine_are_counted():
+    ra = {("n", "q1"): {"gemini": (1, 1)}, ("n", "q2"): {"gemini": (0, 1)}}
+    rb = {("n", "q1"): {"openai": (1, 1)}, ("n", "q2"): {"gemini": (1, 1)}}
+    pd = dy.pair_diffs(ra, rb)
+    assert pd["n_common"] == 1 and pd["no_common_engine"] == 1
+    assert pd["only_a"] == 0 and pd["only_b"] == 0
+
+
+def test_basis_change_names_what_changed():
+    a = {"match_rules_version": 2, "geo": "", "aliases": {"d.com": ["Brand"]}}
+    assert dy.basis_change(None, dy.basis(a, "d.com")) == ""
+    assert dy.basis_change(dy.basis(a, "d.com"), dy.basis(a, "d.com")) == ""
+    b = {**a, "geo": "UZ"}
+    assert dy.basis_change(dy.basis(a, "d.com"), dy.basis(b, "d.com")) == "geo — → UZ"
+    c = {**a, "aliases": {"d.com": ["Brand", "Бренд*"]}}
+    assert dy.basis_change(dy.basis(a, "d.com"), dy.basis(c, "d.com")) == "aliases changed"
+    assert dy.basis_change(dy.basis(a, "other.com"), dy.basis(c, "other.com")) == ""  # other domain untouched
+    old = {"geo": "", "aliases": {}}                      # snapshot from before versioning
+    assert "matching rules v1 → v2" in dy.basis_change(dy.basis(old, "d.com"), dy.basis(a, "d.com"))
