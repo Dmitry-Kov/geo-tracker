@@ -29,7 +29,7 @@ from report_html import build_dashboard
 from report_docx import build_docx
 from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
-from .db import Answer, Brand, Run, init_db, make_engine, make_session_factory
+from .db import Answer, Brand, Run, make_engine, make_session_factory, migrate_database
 from .login_guard import LoginLimiter
 from .runner import execute_run, recover_interrupted, run_rows, start_run
 from .scheduler import cron_trigger, make_scheduler
@@ -210,7 +210,7 @@ def create_app(db_path=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
-        init_db(engine)
+        migrate_database(engine)
         # Before anything can start a run: a run left active by the previous
         # process is dead and would block every new one.
         recover_interrupted(Session)

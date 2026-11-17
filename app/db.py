@@ -5,11 +5,12 @@
 The CSV file stays the CLI's store; the service keeps its own history here.
 """
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import (JSON, DateTime, ForeignKey, Integer, String, Text,
-                        create_engine)
+                        create_engine, inspect)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column,
                             relationship, sessionmaker)
 
@@ -117,5 +118,55 @@ def make_session_factory(engine):
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def init_db(engine) -> None:
-    Base.metadata.create_all(engine)
+BASELINE_REVISION = "0001"
+
+
+def backup_database(path: Path) -> Path:
+    """Copy the DB file using SQLite's online backup API (safe with open
+    connections) into backups/ next to the DB, with a UTC timestamp."""
+    backups = path.parent / "backups"
+    backups.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+    dest = backups / f"{path.stem}-{stamp}{path.suffix}"
+    src = sqlite3.connect(str(path))
+    try:
+        dst = sqlite3.connect(str(dest))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return dest
+
+
+def migrate_database(engine) -> None:
+    """Apply Alembic migrations at startup.
+
+    - empty/new DB: the schema is created by the baseline migration;
+    - DB created by pre-Alembic main (tables but no alembic_version):
+      stamped with the baseline, then upgraded — data untouched;
+    - already at head: nothing happens, no backup is written.
+    Before any change to an existing non-empty DB, a copy is made with
+    SQLite's backup API into backups/ next to the DB file.
+    """
+    from alembic import command
+    from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(BASE_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BASE_DIR / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", str(engine.url))
+    heads = set(ScriptDirectory.from_config(cfg).get_heads())
+    with engine.connect() as conn:
+        tables = set(inspect(conn).get_table_names())
+        current = MigrationContext.configure(conn).get_current_revision()
+    if current in heads:
+        return
+    path = Path(engine.url.database) if engine.url.database else None
+    if path is not None and path.exists() and path.stat().st_size > 0:
+        backup_database(path)
+    if tables and "alembic_version" not in tables:
+        command.stamp(cfg, BASELINE_REVISION)
+    command.upgrade(cfg, "head")
