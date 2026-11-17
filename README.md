@@ -401,6 +401,17 @@ the service does not need it.
   that still cannot start after 6 hours is recorded on the brand as a skipped
   run. Schedules are not persisted across downtime — a tick missed while the
   service was stopped is not replayed.
+- **Database & migrations**: the schema is managed by Alembic
+  (`migrations/`, baseline `0001` = the exact pre-Alembic schema). On
+  startup the service applies pending migrations itself; a DB created by
+  an older version (tables but no `alembic_version`) is stamped with the
+  baseline and adopted **without data loss**. Before any change to an
+  existing DB, a copy is made with SQLite's online backup API into
+  `backups/` next to the DB file (UTC timestamp in the name; gitignored).
+  A startup with nothing to migrate changes nothing and writes no copy.
+  Schema changes for developers: edit `app/db.py` models, then
+  `alembic revision --autogenerate -m "..."` and review the result
+  (batch mode is on for SQLite ALTERs).
 
 Slice-1 limits, stated honestly: one run
 at a time, single user, single process (the login limiter, the run queue and
