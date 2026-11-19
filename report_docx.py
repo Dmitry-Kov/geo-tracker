@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-GEO tracker report export to a branded Optimize.uz DOCX.
+GEO tracker report export to a white-label DOCX.
 
 Usage:
   python report_docx.py                 → geo_report_en_DATE.docx
   python report_docx.py --lang ru       → geo_report_ru_DATE.docx (for a Russian-reading boss)
   python report_docx.py --out path
+  python report_docx.py --brand "Acme SEO" --accent "#1F7A8C"
 
-The report chrome is bilingual (--lang en|ru); niche titles always come
-from queries.py. The style mirrors dashboard.html: ink #16181D, accent
-#FF5C1F, Space Grotesk headings, Inter body text, JetBrains Mono figures.
+Publisher branding comes from --brand / --accent or REPORT_BRAND /
+REPORT_ACCENT (.env); unset, the report renders neutral GEO Monitor chrome
+(footer: GEO Tracker / GEO-трекер). The report chrome is bilingual
+(--lang en|ru); niche titles always come from queries.py. The style mirrors
+dashboard.html: ink #16181D, accent from REPORT_ACCENT (default #FF5C1F),
+Space Grotesk headings, Inter body text, JetBrains Mono figures.
 """
 
 import argparse
@@ -35,16 +39,20 @@ try:
     from queries import ARTICLES  # optional page-level tracking, see geo_tracker.py
 except ImportError:
     ARTICLES = {}
+from report_html import DEFAULT_ACCENT, blend_with_white, resolve_branding
 from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
 
 INK = RGBColor(0x16, 0x18, 0x1D)
-ACCENT = RGBColor(0xFF, 0x5C, 0x1F)
+ACCENT = RGBColor(0xFF, 0x5C, 0x1F)   # default; each build resolves REPORT_ACCENT
 MUTED = RGBColor(0x6B, 0x71, 0x80)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-ACCENT_SOFT = "FFF0E9"   # w:shd fills take a plain hex string
+# w:shd fills take a plain hex string (6 chars, no #)
+DEFAULT_ACCENT_HEX = DEFAULT_ACCENT[1:].upper()
+ACCENT_SOFT = blend_with_white(DEFAULT_ACCENT, 0.10)[1:]   # low-hit / highlight cells
+ACCENT_MID = blend_with_white(DEFAULT_ACCENT, 0.35)[1:]    # 20-49% cells
 LINE = "E4E6E0"
 
 F_HEAD = "Space Grotesk"
@@ -170,14 +178,19 @@ def header_row(table, labels):
                   font=F_MONO, size=8, bold=True, color=WHITE, fill="16181D")
 
 
-def pct_cell(cell, value, *, primary=False):
-    """Percentage cell: fill intensity by visibility level, marker on the primary."""
+def pct_cell(cell, value, *, primary=False, accent_hex=None, accent_mid=None,
+             accent_soft=None):
+    """Percentage cell: fill intensity by visibility level, marker on the primary.
+    Fills default to the standard accent; build_docx passes the resolved one."""
+    accent_hex = DEFAULT_ACCENT_HEX if accent_hex is None else accent_hex
+    accent_mid = ACCENT_MID if accent_mid is None else accent_mid
+    accent_soft = ACCENT_SOFT if accent_soft is None else accent_soft
     if value >= 50:
-        fill, color, bold = "FF5C1F", WHITE, True
+        fill, color, bold = accent_hex, WHITE, True
     elif value >= 20:
-        fill, color, bold = "FFC9B0", INK, True
+        fill, color, bold = accent_mid, INK, True
     elif value > 0:
-        fill, color, bold = ACCENT_SOFT, INK, True
+        fill, color, bold = accent_soft, INK, True
     else:
         fill, color, bold = None, MUTED, False
     text = f"{value:.0f}%" + (" ★" if primary else "")
@@ -236,8 +249,8 @@ STRINGS = {
         "h_hits": "Queries with hits (current snapshot)",
         "hits_cols": ["engine", "niche", "query", "domains"],
         "hits_none": "No hits.",
-        "footer": "Optimize.uz · GEO tracker · official APIs only (Gemini, Perplexity, "
-                  "OpenAI). AI is non-deterministic: read the trend across several runs, "
+        "footer": "{brand} · Official search APIs only (not consumer chat apps). "
+                  "AI is non-deterministic: read the trend across several runs, "
                   "not a single measurement.",
     },
     "ru": {
@@ -289,9 +302,9 @@ STRINGS = {
         "h_hits": "Запросы с попаданиями (текущий срез)",
         "hits_cols": ["движок", "ниша", "запрос", "домены"],
         "hits_none": "Попаданий нет.",
-        "footer": "Optimize.uz · GEO-трекер · только официальные API (Gemini, Perplexity, "
-                  "OpenAI). ИИ недетерминирован: смотрите тренд по нескольким прогонам, "
-                  "а не единичный замер.",
+        "footer": "{brand} · Только официальные поисковые API (не потребительские "
+                  "чат-приложения). ИИ недетерминирован: смотрите тренд по нескольким "
+                  "прогонам, а не единичный замер.",
     },
 }
 
@@ -302,13 +315,27 @@ STRINGS = {
 
 def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
                domains: list = None, niches: dict = None,
-               articles: dict = None, notice: str = None) -> Path:
+               articles: dict = None, notice: str = None,
+               report_brand: str = None, report_subject: str = None,
+               accent_color: str = None) -> Path:
     """Export the report. rows/domains/niches/articles default to the CLI
     history (results.csv + queries.py); the service passes per-brand data.
 
     notice: a line printed right under the header, before any figure — the
-    service passes it for a run that was cancelled or interrupted."""
+    service passes it for a run that was cancelled or interrupted.
+
+    report_brand / accent_color: white-label publisher and accent; None falls
+    back to REPORT_BRAND / REPORT_ACCENT (see resolve_branding). report_subject
+    names what is audited (the service passes the brand's name); it prefixes
+    the subtitle."""
     T = STRINGS[lang]
+    brand, accent = resolve_branding(report_brand, accent_color)
+    subject = (report_subject or "").strip()
+    accent_rgb = RGBColor(int(accent[1:3], 16), int(accent[3:5], 16),
+                          int(accent[5:7], 16))
+    accent_hex = accent[1:].upper()
+    accent_mid = blend_with_white(accent, 0.35)[1:]
+    accent_soft = blend_with_white(accent, 0.10)[1:]
     domains = DOMAINS if domains is None else domains
     niches = NICHES if niches is None else niches
     articles = ARTICLES if articles is None else articles
@@ -330,19 +357,31 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
         section.left_margin = section.right_margin = Cm(2)
         section.top_margin, section.bottom_margin = Cm(1.8), Cm(1.8)
 
-    # Header: Optimize<.>uz GEO monitor, same as the dashboard
+    # Header: brand<.>tld GEO monitor, same as the dashboard; without a
+    # publisher brand it stays neutral: GEO<.>Monitor / GEO<.>Монитор.
     p = doc.add_paragraph()
-    style_run(p.add_run("Optimize"), font=F_HEAD, size=22, bold=True)
-    style_run(p.add_run("."), font=F_HEAD, size=22, bold=True, color=ACCENT)
-    style_run(p.add_run("uz"), font=F_HEAD, size=22, bold=True)
-    style_run(p.add_run(T["header_suffix"]), font=F_HEAD, size=22, bold=True)
+    if "." in brand:
+        left, _, right = brand.rpartition(".")
+        style_run(p.add_run(left), font=F_HEAD, size=22, bold=True)
+        style_run(p.add_run("."), font=F_HEAD, size=22, bold=True, color=accent_rgb)
+        style_run(p.add_run(right), font=F_HEAD, size=22, bold=True)
+        style_run(p.add_run(T["header_suffix"]), font=F_HEAD, size=22, bold=True)
+    elif brand:
+        style_run(p.add_run(brand + T["header_suffix"]),
+                  font=F_HEAD, size=22, bold=True)
+    else:
+        style_run(p.add_run("GEO"), font=F_HEAD, size=22, bold=True)
+        style_run(p.add_run("."), font=F_HEAD, size=22, bold=True, color=accent_rgb)
+        style_run(p.add_run("Monitor" if lang == "en" else "Монитор"),
+                  font=F_HEAD, size=22, bold=True)
     hairline(p, color="16181D")
-    para(doc,
-         T["subtitle"].format(latest=latest,
-                              ts=datetime.now().strftime('%d.%m.%Y %H:%M')),
-         font=F_MONO, size=8.5, color=MUTED, space_after=12)
+    subtitle = T["subtitle"].format(latest=latest,
+                                    ts=datetime.now().strftime('%d.%m.%Y %H:%M'))
+    if subject:
+        subtitle = f"{subject} · " + subtitle
+    para(doc, subtitle, font=F_MONO, size=8.5, color=MUTED, space_after=12)
     if notice:
-        para(doc, notice, size=10.5, bold=True, color=ACCENT, space_after=12)
+        para(doc, notice, size=10.5, bold=True, color=accent_rgb, space_after=12)
 
     # KPI row
     kpi = make_table(doc, 2, 4)
@@ -353,7 +392,7 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
              T["kpi_hits"]),
             (f"{len(dates)}", T["kpi_dates"].format(first=dates[0], latest=latest))]):
         fill_cell(kpi.rows[0].cells[i], val, font=F_MONO, size=16, bold=True,
-                  color=ACCENT if i == 2 else INK)
+                  color=accent_rgb if i == 2 else INK)
         fill_cell(kpi.rows[1].cells[i], label, size=8, color=MUTED)
 
     # Visibility matrix by niche
@@ -371,7 +410,9 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
         fill_cell(m.rows[r_i].cells[0], cfg["title"], size=9, bold=True, center=False)
         for c_i, d in enumerate(domains, start=1):
             pct_cell(m.rows[r_i].cells[c_i], by_dom[d],
-                     primary=d == cfg["primary_domain"])
+                     primary=d == cfg["primary_domain"],
+                     accent_hex=accent_hex, accent_mid=accent_mid,
+                     accent_soft=accent_soft)
         r_i += 1
 
     # Audit-grade uncertainty: ALL samples of the latest run, grounded channel.
@@ -395,7 +436,7 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
                 text = (f"{st['point']:.1f}% [{st['lo']:.1f}–{st['hi']:.1f}]\n"
                         f"nq={st['n_queries']} · n={st['n_samples']}")
                 fill_cell(ut.rows[r_i].cells[c_i], text, font=F_MONO, size=8, bold=True,
-                          fill=ACCENT_SOFT if st["point"] > 0 else None)
+                          fill=accent_soft if st["point"] > 0 else None)
         para(doc, T["uncertainty_method"].format(B=DEFAULT_B, seed=DEFAULT_SEED,
                                              N=MIN_BOOTSTRAP_QUERIES),
              size=8.5, color=MUTED)
@@ -424,8 +465,8 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
             style_run(cell.paragraphs[0].add_run("\n" + cfg["url"]),
                       font=F_MONO, size=7, color=MUTED)
             fill_cell(at.rows[i].cells[1], str(len(cited)), font=F_MONO, size=9,
-                      bold=bool(cited), color=ACCENT if cited else MUTED,
-                      fill=ACCENT_SOFT if cited else None)
+                      bold=bool(cited), color=accent_rgb if cited else MUTED,
+                      fill=accent_soft if cited else None)
             fill_cell(at.rows[i].cells[2], ", ".join(sorted({r["engine"] for r in cited})) or "—",
                       font=F_MONO, size=8.5, center=False)
             fill_cell(at.rows[i].cells[3],
@@ -443,7 +484,8 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
         note = (T["lb_niches"].format(names=", ".join(niches[n]["title"] for n in niches_hit))
                 if niches_hit else T["lb_not_cited"])
         fill_cell(t.rows[i].cells[0], d, font=F_MONO, size=9, center=False)
-        pct_cell(t.rows[i].cells[1], pct)
+        pct_cell(t.rows[i].cells[1], pct, accent_hex=accent_hex,
+                 accent_mid=accent_mid, accent_soft=accent_soft)
         fill_cell(t.rows[i].cells[2], note, size=8.5,
                   color=INK if niches_hit else MUTED, center=False)
 
@@ -458,7 +500,8 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
         fill_cell(et.rows[i].cells[0], e, font=F_MONO, size=9, bold=True, center=False)
         fill_cell(et.rows[i].cells[1], str(sub_n), font=F_MONO, size=9, color=MUTED)
         for c_i, d in enumerate(domains, start=2):
-            pct_cell(et.rows[i].cells[c_i], by_dom[d])
+            pct_cell(et.rows[i].cells[c_i], by_dom[d], accent_hex=accent_hex,
+                     accent_mid=accent_mid, accent_soft=accent_soft)
 
     # Auto-derived findings from the data
     heading(doc, T["h_observations"])
@@ -480,7 +523,7 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
         para(doc, "◐ " + line, size=9.5, color=MUTED, space_after=3)
     if zeros:
         para(doc, T["obs_zeros"].format(domains=", ".join(zeros)),
-             size=9.5, bold=True, color=ACCENT, space_after=3)
+             size=9.5, bold=True, color=accent_rgb, space_after=3)
 
     # Hits from the latest run
     heading(doc, T["h_hits"])
@@ -495,24 +538,31 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
             fill_cell(ht.rows[i].cells[1], r["niche"], size=8.5, center=False)
             fill_cell(ht.rows[i].cells[2], r["query"], size=8.5, center=False)
             fill_cell(ht.rows[i].cells[3], ", ".join(ds), font=F_MONO, size=8.5,
-                      color=ACCENT, center=False, fill=ACCENT_SOFT)
+                      color=accent_rgb, center=False, fill=accent_soft)
     else:
         para(doc, T["hits_none"], size=9.5, color=MUTED)
 
-    # Footer
+    # Footer: publisher brand (neutral GEO Tracker / GEO-трекер without one)
+    # and the honest channel caveat — APIs, not the consumer chat apps.
     p = para(doc, "", space_before=16)
     hairline(p)
-    para(doc, T["footer"], font=F_MONO, size=8, color=MUTED)
+    para(doc, T["footer"].format(
+             brand=brand or ("GEO Tracker" if lang == "en" else "GEO-трекер")),
+         font=F_MONO, size=8, color=MUTED)
 
     doc.save(out_path)
     return out_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export the report to an Optimize.uz DOCX")
+    parser = argparse.ArgumentParser(description="Export the report to a white-label DOCX")
     parser.add_argument("--out", help="path for the output .docx")
     parser.add_argument("--lang", choices=sorted(STRINGS), default="en",
                         help="report-chrome language (default: en); niche titles come from queries.py")
+    parser.add_argument("--brand", help="publisher/agency name on the report "
+                        "(default: REPORT_BRAND from .env, else neutral GEO Monitor)")
+    parser.add_argument("--accent", help="accent color #RRGGBB "
+                        "(default: REPORT_ACCENT from .env, else #FF5C1F)")
     args = parser.parse_args()
     if not DOMAINS or not NICHES:
         raise SystemExit("queries.py is missing or defines no DOMAINS / NICHES.\n"
@@ -520,7 +570,8 @@ def main():
     if not RESULTS_CSV.exists():
         raise SystemExit("results.csv not found — run first: python geo_tracker.py run")
     default = BASE_DIR / f"geo_report_{args.lang}_{datetime.now().strftime('%Y-%m-%d')}.docx"
-    out = build_docx(Path(args.out) if args.out else default, lang=args.lang)
+    out = build_docx(Path(args.out) if args.out else default, lang=args.lang,
+                     report_brand=args.brand, accent_color=args.accent)
     print(f"Done: {out}")
 
 

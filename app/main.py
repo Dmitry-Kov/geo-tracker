@@ -634,8 +634,11 @@ def create_app(db_path=None) -> FastAPI:
             cfg, rows = run_rows(run)
             fd, tmp = tempfile.mkstemp(suffix=".html")
             os.close(fd)
+            # subject = the audited brand; publisher branding (REPORT_BRAND /
+            # REPORT_ACCENT) is resolved from the environment by the builder.
             build_dashboard(rows, cfg["domains"], cfg["niches"], Path(tmp),
-                            articles=cfg["articles"], notice=incomplete_notice(run))
+                            articles=cfg["articles"], notice=incomplete_notice(run),
+                            report_subject=b.name)
             tag = "" if run.status == "done" else f"_{run.status}"
         return FileResponse(tmp, filename=f"geo_dashboard_{b.name}_{run_id}{tag}.html",
                             background=BackgroundTask(os.unlink, tmp))
@@ -654,7 +657,7 @@ def create_app(db_path=None) -> FastAPI:
             os.close(fd)
             build_docx(Path(tmp), lang=lang, rows=rows, domains=cfg["domains"],
                        niches=cfg["niches"], articles=cfg["articles"],
-                       notice=incomplete_notice(run, lang))
+                       notice=incomplete_notice(run, lang), report_subject=b.name)
             tag = "" if run.status == "done" else f"_{run.status}"
         return FileResponse(tmp, filename=f"geo_report_{lang}_{b.name}_{run_id}{tag}.docx",
                             background=BackgroundTask(os.unlink, tmp))

@@ -42,7 +42,8 @@ def env(monkeypatch):
     for e in gt.ENGINES:
         monkeypatch.setenv(gt.ENGINES[e]["env"], "test-key")
         monkeypatch.setitem(gt.ENGINES[e], "fn", fake_answer)
-    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY"):
+    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY",
+                "REPORT_BRAND", "REPORT_ACCENT"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gt, "load_env", lambda: None)
     monkeypatch.setattr(runner, "SLEEP_SEC", 0)
