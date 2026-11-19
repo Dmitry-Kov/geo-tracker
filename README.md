@@ -475,6 +475,22 @@ docker compose up -d --build
 - `/data` (host directory: `GEO_DATA_DIR`, default `./data`) holds
   `geo_tracker.db` (SQLite, WAL) and `backups/` — the whole history lives
   there; back it up. The compose file sets `GEO_DB_PATH=/data/geo_tracker.db`.
+- **Scheduled backups**: `python -m app.backup` takes an online copy (safe
+  while the service writes), verifies it with `PRAGMA integrity_check`, and
+  only then prunes older copies. Rotating backups live in
+  `/data/backups/scheduled/`, separate from the pre-migration backups in
+  `/data/backups/`, which are never pruned. A failed verification deletes
+  the bad copy and keeps the existing ones.
+
+  ```bash
+  # manual backup (keep the newest 14 copies):
+  docker compose exec -T app python -m app.backup --keep 14
+  ```
+
+  ```cron
+  # daily at 03:15 UTC from the host's crontab:
+  15 3 * * * docker compose -f /opt/geo-tracker/docker-compose.yml exec -T app python -m app.backup --keep 14
+  ```
 - **One process, no `--workers`**: the scheduler, the run queue and the login
   limiter live in it. The app port is not published to the host — only Caddy
   reaches it on the internal compose network. That is why uvicorn runs with
