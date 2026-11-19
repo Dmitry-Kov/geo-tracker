@@ -146,14 +146,17 @@ def make_session_factory(engine):
 BASELINE_REVISION = "0001"
 
 
-def backup_database(path: Path) -> Path:
+def backup_database(path: Path, dest_dir: Path = None) -> Path:
     """Copy the DB file using SQLite's online backup API (safe with open
-    connections) into backups/ next to the DB, with a UTC timestamp."""
-    backups = path.parent / "backups"
-    backups.mkdir(exist_ok=True)
+    connections) into dest_dir — by default backups/ next to the DB — with
+    a UTC timestamp."""
+    backups = Path(dest_dir) if dest_dir is not None else path.parent / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
     dest = backups / f"{path.stem}-{stamp}{path.suffix}"
-    src = sqlite3.connect(str(path))
+    # timeout: an active WAL writer must not fail the backup instantly with
+    # "database is locked" — wait briefly for the writer instead.
+    src = sqlite3.connect(str(path), timeout=5.0)
     try:
         dst = sqlite3.connect(str(dest))
         try:
