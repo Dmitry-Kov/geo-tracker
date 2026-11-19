@@ -10,6 +10,10 @@
 <body>
 <header class="top">
   <div class="wrap bar">
+    {% if share_mode %}
+    {# client share view: no admin nav, logo links back to the share home #}
+    <a class="logo" href="{{ share_home }}">{% if report_brand %}{{ report_brand }}{% else %}geo<span>.</span>tracker{% endif %}</a>
+    {% else %}
     <a class="logo" href="/">geo<span>.</span>tracker</a>
     <nav>
       <a href="/">Brands</a>
@@ -18,6 +22,7 @@
       <form method="post" action="/logout" class="inline"><button class="link">Logout</button></form>
       {% endif %}
     </nav>
+    {% endif %}
   </div>
 </header>
 <main class="wrap" id="main">

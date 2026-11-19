@@ -66,6 +66,23 @@ def make_v1_db(path, *, versioned):
     return path
 
 
+def make_v2_db(path):
+    """A database exactly at 0002, with data — built by the migrations
+    themselves (0001 + data, then the 0002 upgrade)."""
+    from alembic import command
+    from alembic.config import Config
+
+    make_v1_db(path, versioned=True)
+    engine = make_engine(path)
+    cfg = Config(str(BASE_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BASE_DIR / "migrations"))
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "0002")
+    engine.dispose()
+    return path
+
+
 def db_snapshot(path):
     conn = sqlite3.connect(path)
     try:
@@ -89,13 +106,14 @@ def test_old_main_db_adopted_with_data_and_backup(tmp_path):
         Session = app.state.Session
         with Session() as s:
             assert s.get(Brand, 1).name == "OldBrand"
+            assert s.get(Brand, 1).share_token is None
             assert s.get(Run, 1).status == "done"
             assert s.get(Answer, "oldrow000001").query == "q"
             assert s.query(Hit).count() == 1
         conn = sqlite3.connect(path)
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         conn.close()
-        assert version == "0002"  # stamped 0001, then upgraded to head
+        assert version == "0003"  # stamped 0001, then upgraded to head
 
     backups = list((tmp_path / "backups").glob("old-*.db"))
     assert len(backups) == 1
@@ -108,14 +126,16 @@ def test_old_main_db_adopted_with_data_and_backup(tmp_path):
         assert "alembic_version" not in tables
         cols = [r[1] for r in conn.execute("PRAGMA table_info(runs)")]
         assert "cancel_requested" not in cols
+        bcols = [r[1] for r in conn.execute("PRAGMA table_info(brands)")]
+        assert "share_token" not in bcols
     finally:
         conn.close()
 
 
 def test_upgrade_0001_with_data_to_0002(tmp_path):
-    """The first real migration: a versioned 0001 DB with data → startup →
-    data intact, version 0002, old rows get cancel_requested=0, and the
-    backup preserves the pre-migration (0001) state."""
+    """A versioned 0001 DB with data → startup → upgrades to head (0003):
+    data intact, old rows get cancel_requested=0 and share_token=None, and
+    the backup preserves the pre-migration (0001) state."""
     path = make_v1_db(tmp_path / "v1.db", versioned=True)
     app = create_app(db_path=path)
     with TestClient(app, base_url="http://localhost") as c:
@@ -123,6 +143,7 @@ def test_upgrade_0001_with_data_to_0002(tmp_path):
         Session = app.state.Session
         with Session() as s:
             assert s.get(Brand, 1).name == "OldBrand"
+            assert s.get(Brand, 1).share_token is None
             run = s.get(Run, 1)
             assert run.status == "done"
             assert run.cancel_requested == 0  # server_default filled old rows
@@ -131,7 +152,7 @@ def test_upgrade_0001_with_data_to_0002(tmp_path):
     conn = sqlite3.connect(path)
     version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
     conn.close()
-    assert version == "0002"
+    assert version == "0003"
 
     backups = list((tmp_path / "backups").glob("v1-*.db"))
     assert len(backups) == 1
@@ -142,6 +163,50 @@ def test_upgrade_0001_with_data_to_0002(tmp_path):
         assert bconn.execute("SELECT name FROM brands").fetchone()[0] == "OldBrand"
         cols = [r[1] for r in bconn.execute("PRAGMA table_info(runs)")]
         assert "cancel_requested" not in cols  # copy is pre-migration
+    finally:
+        bconn.close()
+
+
+def test_upgrade_0002_with_data_to_0003(tmp_path):
+    """The share-link migration: a versioned 0002 DB with data → startup →
+    data intact, version 0003, old brands get share_token=None, and the
+    backup preserves the pre-migration (0002) state without the column.
+    0003 recreates the brands table (unique constraint), which must not
+    trip over the runs → brands foreign key."""
+    path = make_v2_db(tmp_path / "v2.db")
+    app = create_app(db_path=path)
+    with TestClient(app, base_url="http://localhost") as c:
+        assert "OldBrand" in c.get("/").text
+        Session = app.state.Session
+        with Session() as s:
+            b = s.get(Brand, 1)
+            assert b.name == "OldBrand"
+            assert b.share_token is None
+            run = s.get(Run, 1)
+            assert run.status == "done" and run.cancel_requested == 0
+            assert s.get(Answer, "oldrow000001").query == "q"
+            assert s.query(Hit).count() == 1
+    conn = sqlite3.connect(path)
+    try:
+        version = conn.execute(
+            "SELECT version_num FROM alembic_version").fetchone()[0]
+        assert version == "0003"
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(brands)")]
+        assert "share_token" in cols
+        # the FK from runs survived the table recreation
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+    backups = list((tmp_path / "backups").glob("v2-*.db"))
+    assert len(backups) == 1
+    bconn = sqlite3.connect(backups[0])
+    try:
+        assert bconn.execute(
+            "SELECT version_num FROM alembic_version").fetchone()[0] == "0002"
+        assert bconn.execute("SELECT name FROM brands").fetchone()[0] == "OldBrand"
+        cols = [r[1] for r in bconn.execute("PRAGMA table_info(brands)")]
+        assert "share_token" not in cols  # copy is pre-migration
     finally:
         bconn.close()
 

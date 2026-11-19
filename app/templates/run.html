@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Run {{ run.id }} · {{ brand.name }} · geo-tracker{% endblock %}
 {% block content %}
+{% set brand_url = share_home if share_mode else '/brands/' ~ brand.id %}
+{% set run_url = ('/share/' ~ share_token ~ '/runs/' ~ run.id) if share_mode else '/runs/' ~ run.id %}
 <div class="head-row">
-  <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ run {{ run.id }}</span></h1>
+  <h1><a href="{{ brand_url }}">{{ brand.name }}</a> <span class="muted">/ run {{ run.id }}</span></h1>
   <div class="row-actions">
+    {% if not share_mode %}
     {% if active and run.cancel_requested %}
     <span class="mono small muted">Cancel requested</span>
     {% elif active %}
@@ -11,13 +14,15 @@
       <button class="btn danger" type="submit">Cancel</button>
     </form>
     {% endif %}
-    <a class="btn" href="/runs/{{ run.id }}/report.html">Dashboard HTML</a>
-    <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=en">DOCX en</a>
-    <a class="btn" href="/runs/{{ run.id }}/report.docx?lang=ru">DOCX ru</a>
+    {% endif %}
+    <a class="btn" href="{{ run_url }}/report.html">Dashboard HTML</a>
+    <a class="btn" href="{{ run_url }}/report.docx?lang=en">DOCX en</a>
+    <a class="btn" href="{{ run_url }}/report.docx?lang=ru">DOCX ru</a>
   </div>
 </div>
 
-{% set poll = True %}{% set refresh = False %}{% include "_progress.html" %}
+{# share view: read-only, no live polling of the admin progress endpoint #}
+{% set poll = not share_mode %}{% set refresh = False %}{% include "_progress.html" %}
 {% if notice %}<div class="banner err">{{ notice }}</div>{% endif %}
 <p class="mono small muted">
   trigger={{ run.trigger }}
@@ -62,8 +67,8 @@
   {% endif %}{% endfor %}
 </table>
 <p class="small muted">Unit of evidence is the query. Wilson (n=nq) when nq&lt;{{ N }} or share is 0/100%;
-seeded cluster bootstrap (B={{ B }}, seed={{ seed }}) otherwise. Lower bound on resources below:
-successful answers only.</p>
+seeded cluster bootstrap (B={{ B }}, seed={{ seed }}) otherwise.{% if not share_mode %} Lower bound on resources below:
+successful answers only.{% endif %}</p>
 </div>
 {% endif %}
 
@@ -91,7 +96,8 @@ targets first.</p>
 </div>
 {% endif %}
 
-{% if usage %}
+{% if usage and not share_mode %}
+{# internal COGS: never shown on the client share view #}
 <h2>Resource usage — from receipts</h2>
 <div class="card">
 <table>
@@ -122,7 +128,7 @@ targets first.</p>
     <td class="mono small">{{ a.model or "—" }}</td>
     <td><span class="badge {{ 'ok' if a.status == 'ok' else 'error' }}">{{ "ok" if a.status == "ok" else "error" }}</span></td>
     <td class="mono">{{ a.n_sources }}</td>
-    <td><button class="btn small" hx-get="/answers/{{ a.id }}" hx-target="#receipt-box" hx-swap="innerHTML">receipt</button></td>
+    <td><button class="btn small" hx-get="{{ ('/share/' ~ share_token ~ '/answers/' ~ a.id) if share_mode else '/answers/' ~ a.id }}" hx-target="#receipt-box" hx-swap="innerHTML">receipt</button></td>
   </tr>
   {% endfor %}
 </table>

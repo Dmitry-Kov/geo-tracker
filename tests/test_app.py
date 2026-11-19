@@ -471,9 +471,15 @@ def test_scheduled_tick_waits_for_a_manual_run(client, env):
     job = client.app.state.scheduler.get_job(f"brand-{brand_id}")
     t = threading.Thread(target=job.func, args=(brand_id,))
     t.start()
-    time.sleep(0.1)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        with Session() as s:
+            if s.get(Run, 2) is not None:
+                break
+        time.sleep(0.01)
     with Session() as s:
         waiting = s.get(Run, 2)                             # the wait is a visible run
+        assert waiting is not None
         assert waiting.status == "queued" and waiting.trigger == "scheduled"
         assert waiting.active is None and waiting.config is None
         manual = s.get(Run, 1)

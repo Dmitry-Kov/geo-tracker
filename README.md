@@ -455,6 +455,17 @@ the service does not need it.
   real client addresses (raw `X-Forwarded-For` is never trusted). Set
   `APP_HTTPS_ONLY=1` when TLS terminates in front of the service: the session
   cookie gets the `Secure` flag and browsers will not send it over plain HTTP.
+- **Client share links**: opt-in per brand (the `Client share link` card on
+  the brand page) — a read-only `/share/{token}` view of that brand's done
+  runs, history, run comparison and HTML/DOCX exports, no login required.
+  The token is the only key (192-bit, URL-safe); **Rotate** replaces it and
+  **Revoke** disables sharing — the old link stops working immediately.
+  Links are strictly brand-isolated (another brand's runs, receipts and
+  exports read as 404), hide internal API usage/cost, and keep the
+  "Incomplete run" notice on partial runs. Every shared response carries
+  `Referrer-Policy: no-referrer` (the token never leaks via `Referer`) and
+  `X-Robots-Tag: noindex, nofollow` (search engines do not index client
+  links).
 - **Scheduler**: APScheduler cron per brand, **in UTC** (`0 9 * * 1` =
   Mondays 09:00 UTC). Scheduled runs queue: brands on the same tick run one
   after another, and a tick that lands on a manual run waits for it. A tick

@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Compare · {{ brand.name }} · geo-tracker{% endblock %}
 {% block content %}
+{% set brand_url = share_home if share_mode else '/brands/' ~ brand.id %}
 <div class="head-row">
-  <h1><a href="/brands/{{ brand.id }}">{{ brand.name }}</a> <span class="muted">/ compare</span></h1>
-  <a class="btn" href="/brands/{{ brand.id }}">Back to brand</a>
+  <h1><a href="{{ brand_url }}">{{ brand.name }}</a> <span class="muted">/ compare</span></h1>
+  <a class="btn" href="{{ brand_url }}">Back to brand</a>
 </div>
 
 <div class="card">
-<form method="get" action="/brands/{{ brand.id }}/compare" class="row-actions">
+<form method="get" action="{{ brand_url }}/compare" class="row-actions">
   <label>Run A
     <select name="a">{% for r in done_list %}<option value="{{ r.id }}" {{ 'selected' if r.id == a }}>{{ r.label }}</option>{% endfor %}</select></label>
   <label>Run B

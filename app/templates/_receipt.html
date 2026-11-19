@@ -16,7 +16,8 @@
     <ol class="small">{% for u in a.receipt.urls %}<li class="mono">{{ u }}</li>{% endfor %}</ol>
     {% if a.receipt.titles %}<p class="mono small muted">titles: {{ a.receipt.titles | join(" · ") }}</p>{% endif %}
   </details>
-  {% if a.receipt.usage %}
+  {% if a.receipt.usage and not share_mode %}
+  {# internal API billing: never shown on the client share view #}
   <details><summary>Usage (raw API report)</summary>
     <pre class="text">{{ a.receipt.usage | tojson(indent=2) }}</pre></details>
   {% endif %}
