@@ -5,8 +5,9 @@ The module is pure (rows in, numbers out), so everything here runs on
 synthetic CSV-shaped rows — no config, no files, no network.
 """
 from sov_stats import (DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES,
-                       cluster_counts, format_ci, hit, is_grounded, share_ci,
-                       sov_stats, wilson_interval)
+                       _host_matches_tracked, cluster_counts, format_ci, hit,
+                       is_grounded, share_ci, sov_stats, unowned_cited_sources,
+                       wilson_interval)
 
 
 def make_row(niche="n1", query="q1", domain="example.com", src=0, txt=0,
@@ -211,3 +212,149 @@ def test_defaults_are_the_documented_methodology():
     assert DEFAULT_B == 2000
     assert DEFAULT_SEED == 0
     assert MIN_BOOTSTRAP_QUERIES == 30
+
+
+# ---------------------------------------------------------------------------
+# unowned_cited_sources: who the engines cite instead of the tracked domains
+# ---------------------------------------------------------------------------
+
+def cited_row(query="q1", hosts="", niche="n1", engine="gemini", src=0, txt=0,
+              domain="brand.io", status="ok", n_sources=1):
+    r = make_row(niche=niche, query=query, domain=domain, src=src, txt=txt,
+                 status=status, n_sources=n_sources, engine=engine)
+    r["all_source_domains"] = hosts
+    return r
+
+
+def test_host_matches_tracked_exact_and_subdomains():
+    tracked = ["brand.io"]
+    for h in ("brand.io", "www.brand.io", "shop.brand.io", "a.b.brand.io",
+              "WWW.Brand.IO", "  brand.io  "):
+        assert _host_matches_tracked(h, tracked), h
+
+
+def test_host_matches_tracked_rejects_lookalikes():
+    tracked = ["brand.io"]
+    for h in ("1brand.io", "my-brand.io", "brand.io.evil.com", "brand.iox",
+              "brand.com", "other.org", ""):
+        assert not _host_matches_tracked(h, tracked), h
+    # a tracked entry written with www. is normalized too
+    assert _host_matches_tracked("shop.brand.io", ["www.brand.io"])
+    assert not _host_matches_tracked("1brand.io", ["www.brand.io"])
+
+
+def test_unowned_sources_exclude_tracked_hosts_and_subdomains():
+    rows = [cited_row(hosts="brand.io;shop.brand.io;www.brand.io;news.example.net")]
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    assert [s["domain"] for s in out["n1"]["sources"]] == ["news.example.net"]
+    assert out["n1"]["total_grounded"] == 1 and out["n1"]["total_queries"] == 1
+
+
+def test_unowned_sources_keep_lookalikes():
+    hosts = "1brand.io;my-brand.io;brand.io.evil.com"
+    out = unowned_cited_sources([cited_row(hosts=hosts)], ["brand.io"], ["n1"])
+    assert {s["domain"] for s in out["n1"]["sources"]} == {
+        "1brand.io", "my-brand.io", "brand.io.evil.com"}
+
+
+def test_unowned_sources_repeat_samples_are_one_query_many_answers():
+    rows = [cited_row(query="q1", hosts="news.example.net") for _ in range(3)]
+    rows.append(cited_row(query="q2", hosts="news.example.net"))
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    g = out["n1"]
+    assert (g["total_grounded"], g["total_queries"]) == (4, 2)
+    s = g["sources"][0]
+    assert (s["answers"], s["queries"]) == (4, 2)
+    assert (s["gap_answers"], s["gap_queries"]) == (4, 2)  # brand never appears
+
+
+def test_unowned_sources_gap_queries_vs_queries():
+    # q1: two samples — one where the brand is a source, one where it is not;
+    # q2: the brand is named in text only. Both still cite the third party.
+    rows = [cited_row(query="q1", hosts="news.example.net", src=1),
+            cited_row(query="q1", hosts="news.example.net", src=0),
+            cited_row(query="q2", hosts="news.example.net", txt=1)]
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    s = out["n1"]["sources"][0]
+    assert (s["answers"], s["queries"]) == (3, 2)
+    assert (s["gap_answers"], s["gap_queries"]) == (1, 1)
+
+
+def test_unowned_sources_brand_missed_only_when_no_tracked_domain_hits():
+    rows = [cited_row(hosts="news.example.net", domain="brand.io", src=0, txt=0)]
+    # a hit on ANY tracked domain means the brand was present in that answer
+    rows[0]["src_other.org"] = "1"
+    out = unowned_cited_sources(rows, ["brand.io", "other.org"], ["n1"])
+    s = out["n1"]["sources"][0]
+    assert (s["gap_answers"], s["gap_queries"]) == (0, 0)
+    assert (s["answers"], s["queries"]) == (1, 1)
+
+
+def test_unowned_sources_sorting_and_limit():
+    rows = []
+    # gap_queries dominates: "a" misses on 2 queries, "b" on 1 (more answers)
+    rows += [cited_row(query=f"q{i}", hosts="a.example.net") for i in range(2)]
+    rows += [cited_row(query="q1", hosts="b.example.net") for _ in range(5)]
+    # "c" and "d" tie on gap_queries=0 and queries=1; answers break the tie,
+    # then the domain name: c has 2 answers, d and e have 1 each.
+    rows += [cited_row(query="q9", hosts="c.example.net", src=1) for _ in range(2)]
+    rows += [cited_row(query="q9", hosts="d.example.net", src=1)]
+    rows += [cited_row(query="q9", hosts="e.example.net", src=1)]
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"], limit=10)
+    assert [s["domain"] for s in out["n1"]["sources"]] == [
+        "a.example.net", "b.example.net", "c.example.net",
+        "d.example.net", "e.example.net"]
+    a, b = out["n1"]["sources"][:2]
+    assert (a["gap_queries"], a["queries"]) == (2, 2)
+    assert (b["gap_queries"], b["queries"], b["answers"]) == (1, 1, 5)
+    limited = unowned_cited_sources(rows, ["brand.io"], ["n1"], limit=2)
+    assert [s["domain"] for s in limited["n1"]["sources"]] == [
+        "a.example.net", "b.example.net"]
+    # a non-positive limit keeps everything
+    assert len(unowned_cited_sources(rows, ["brand.io"], ["n1"], limit=0)
+               ["n1"]["sources"]) == 5
+
+
+def test_unowned_sources_ignore_ungrounded_and_error_rows():
+    rows = [cited_row(query="q1", hosts="news.example.net"),
+            cited_row(query="q2", hosts="ghost.example.net", n_sources=0),
+            cited_row(query="q3", hosts="broken.example.net", status="error: quota")]
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    g = out["n1"]
+    assert (g["total_grounded"], g["total_queries"]) == (1, 1)
+    assert [s["domain"] for s in g["sources"]] == ["news.example.net"]
+    # a niche with nothing grounded-ok is omitted entirely
+    assert unowned_cited_sources(rows[1:], ["brand.io"], ["n1"]) == {}
+
+
+def test_unowned_sources_empty_and_duplicate_entries():
+    rows = [cited_row(hosts=";;news.example.net;NEWS.example.net;"
+                            "www.news.example.net;  news.example.net  ;"),
+            cited_row(query="q2", hosts=None),
+            cited_row(query="q3")]  # no all_source_domains key at all
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    g = out["n1"]
+    assert (g["total_grounded"], g["total_queries"]) == (3, 3)
+    assert len(g["sources"]) == 1
+    s = g["sources"][0]
+    assert s["domain"] == "news.example.net"
+    assert (s["answers"], s["queries"]) == (1, 1)  # deduplicated within the row
+
+
+def test_unowned_sources_engines_distinct_and_sorted():
+    rows = [cited_row(hosts="news.example.net", engine="openai"),
+            cited_row(hosts="news.example.net", engine="gemini"),
+            cited_row(hosts="news.example.net", engine="openai")]
+    out = unowned_cited_sources(rows, ["brand.io"], ["n1"])
+    assert out["n1"]["sources"][0]["engines"] == ["gemini", "openai"]
+
+
+def test_unowned_sources_niche_order_and_omission():
+    niches = {"n2": {"title": "Two"}, "n1": {"title": "One"}, "n3": {"title": "Three"}}
+    rows = [cited_row(niche="n1", hosts="news.example.net"),
+            cited_row(niche="n2", hosts="brand.io"),          # all tracked → omitted
+            cited_row(niche="n3", hosts="blog.example.org")]
+    out = unowned_cited_sources(rows, ["brand.io"], niches)
+    assert list(out) == ["n1", "n3"]                          # caller's niche order
+    assert unowned_cited_sources([], ["brand.io"], niches) == {}
+    assert unowned_cited_sources(rows, ["brand.io"], []) == {}

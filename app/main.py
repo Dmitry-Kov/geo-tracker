@@ -28,7 +28,8 @@ from starlette.middleware.sessions import SessionMiddleware
 import geo_tracker as gt
 from report_html import build_dashboard
 from report_docx import build_docx
-from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
+from sov_stats import (sov_stats, unowned_cited_sources, DEFAULT_B, DEFAULT_SEED,
+                       MIN_BOOTSTRAP_QUERIES)
 
 from .db import Answer, Brand, Run, make_engine, make_session_factory, migrate_database
 from . import dynamics
@@ -571,6 +572,10 @@ def create_app(db_path=None) -> FastAPI:
                 matrix[niche] = {d: round(100 * sum(_hit(r, d) for r in sub) / len(sub), 1)
                                  for d in cfg["domains"]}
         audit = sov_stats(ok_rows, cfg["domains"], cfg["niches"], grounded=True)
+        # Third-party citation gap: strictly from the snapshot's domains/niches,
+        # so adding a rival to the brand later never rewrites a finished run.
+        sources_gap = unowned_cited_sources(ok_rows, cfg["domains"], cfg["niches"],
+                                            limit=10)
         usage = {}
         for a in run.answers:
             u = a.usage or {}
@@ -591,6 +596,7 @@ def create_app(db_path=None) -> FastAPI:
                 agg["cost"] += c
                 agg["cost_known"] = True
         return {"run": run, "brand": b, "cfg": cfg, "matrix": matrix, "audit": audit,
+                "sources_gap": sources_gap,
                 "usage": usage, "answers": list(run.answers),
                 "active": run.status in WAITING,
                 # shown once the run is over without being done

@@ -9,6 +9,8 @@ no network, no quota spent.
 import argparse
 import csv
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1011,3 +1013,189 @@ def test_report_help_documents_brand_flags_without_publisher(monkeypatch, capsys
         help_text = capsys.readouterr().out
         assert "--brand" in help_text and "--accent" in help_text
         assert "Optimize" not in help_text
+
+
+# ---------------------------------------------------------------------------
+# Top cited third-party sources: the placement-gap table in HTML and DOCX
+# ---------------------------------------------------------------------------
+
+def seed_gap_history(paths):
+    """q1: brand + third party; q2: third party only (brand absent);
+    plus an older run citing another third party — latest-run only."""
+    gt.append_row(gt.make_row("gemini", "n1", "q1", answer={
+        "text": "see example.com and news.example.net",
+        "urls": ["https://example.com/a", "https://news.example.net/b"],
+        "titles": ["example.com", "news.example.net"], "model": "m"}))
+    gt.append_row(gt.make_row("gemini", "n1", "q2", answer={
+        "text": "t", "urls": ["https://news.example.net/c"],
+        "titles": ["news.example.net"], "model": "m"}))
+    old = gt.make_row("gemini", "n1", "q0", answer={
+        "text": "t", "urls": ["https://old.example.net/x"],
+        "titles": ["old.example.net"], "model": "m"})
+    old["run_date"], old["run_ts"] = "2020-01-01", "2020-01-01T00:00:00Z"
+    gt.append_row(old)
+
+
+def test_dashboard_sources_gap_section(paths):
+    from report_html import build_dashboard
+    seed_gap_history(paths)
+    out = paths / "gap.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    assert '<section id="sourcesSec" hidden>' in html       # unhidden by JS only
+    assert "Top cited third-party sources" in html
+    data = dashboard_blob(html)
+    # latest run only (old.example.net stays out), grounded ok rows, and the
+    # gap counts: news.example.net in 2 queries, brand absent on 1 of them
+    assert data["sources_gap"] == {"n1": {
+        "total_grounded": 2, "total_queries": 2,
+        "sources": [{"domain": "news.example.net", "answers": 2, "queries": 2,
+                     "gap_answers": 1, "gap_queries": 1, "engines": ["gemini"]}]}}
+    for frag in ("D.sources_gap", "esc(s.domain)", "esc(info.title)",
+                 "esc(s.engines.join(', '))"):
+        assert frag in html
+
+
+def test_dashboard_sources_gap_empty_when_all_sources_tracked(paths):
+    from report_html import build_dashboard
+    seed_history(paths)                                     # only example.com cited
+    out = paths / "nogap.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    assert dashboard_blob(html)["sources_gap"] == {}
+    assert '<section id="sourcesSec" hidden>' in html       # stays hidden
+
+
+def test_dashboard_sources_gap_escapes_hostile_domains(paths):
+    from report_html import build_dashboard
+    row = gt.make_row("gemini", "n1", "q1", answer={
+        "text": "t", "urls": ["https://news.example.net/a"],
+        "titles": ["news.example.net"], "model": "m"})
+    row["all_source_domains"] += (";<img src=x onerror=alert(1)>"
+                                  ";</script><script>alert(2)</script>")
+    gt.append_row(row)
+    out = paths / "hostile_gap.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS,
+                    {"n1": {"title": "<b>evil</b>", "primary_domain": "example.com"}},
+                    out)
+    html = out.read_text(encoding="utf-8")
+    start = html.index("const D = ") + len("const D = ")
+    end = html.index(";\n", start)
+    blob = html[start:end]
+    assert "</" not in blob                                 # no early </script>
+    data = json.loads(blob)                                 # round-trips intact
+    domains = {s["domain"] for s in data["sources_gap"]["n1"]["sources"]}
+    assert domains == {"news.example.net", "<img src=x onerror=alert(1)>",
+                       "</script><script>alert(2)</script>"}
+    markup = html[:start] + html[end:]
+    assert "<img src=x" not in markup                       # never raw markup
+    assert "<script>alert(2)" not in markup
+    assert "<b>evil</b>" not in markup
+    assert html.count("</script>") == 2
+
+
+def test_dashboard_inline_js_renders_sources_gap_in_node(paths):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    from report_html import build_dashboard
+    seed_gap_history(paths)
+    out = paths / "node.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    stub = """
+const els = {};
+const mk = id => els[id] || (els[id] = {id, hidden: false, innerHTML: '',
+                                        textContent: '', style: {setProperty(){}}});
+const document = {getElementById: mk, title: '',
+                  documentElement: {style: {setProperty(){}}}};
+class Chart { constructor(){} }
+"""
+    tail = """
+console.log(JSON.stringify({hidden: els['sourcesSec'].hidden,
+                            gap: els['sourcesGap'].innerHTML}));
+"""
+    p = subprocess.run([node], input=stub + script + tail,
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    rendered = json.loads(p.stdout.strip().splitlines()[-1])
+    assert rendered["hidden"] is False                      # section unhidden
+    assert "news.example.net" in rendered["gap"]
+    assert "2/2 (2 ans.)" in rendered["gap"]
+    assert "1 queries (1 ans.)" in rendered["gap"]
+    assert "Niche One" in rendered["gap"]
+
+
+def test_build_docx_sources_gap_both_langs(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_gap_history(paths)
+    for lang, heading, col in (
+            ("en", "Top cited third-party sources", "source domain"),
+            ("ru", "Кого цитируют вместо вас (сторонние источники)",
+             "домен-источник")):
+        out = paths / f"gap_{lang}.docx"
+        report_docx.build_docx(out, lang=lang)
+        doc = docx.Document(out)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert heading in text
+        tables = [t for t in doc.tables if t.rows[0].cells[1].text == col]
+        assert len(tables) == 1, lang
+        cells = [c.text for c in tables[0].rows[1].cells]
+        assert cells[0] == "Niche One"
+        assert cells[1] == "news.example.net"
+        assert cells[2].startswith("2/2 (2 ")               # queries cited
+        assert cells[3].startswith("1 (1 ")                 # brand absent
+        assert cells[4] == "gemini"
+        all_cells = "\n".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+        assert "old.example.net" not in all_cells           # latest run only
+
+
+def test_build_docx_sources_gap_omitted_when_all_tracked(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_history(paths)
+    for lang, heading in (("en", "Top cited third-party sources"),
+                          ("ru", "Кого цитируют вместо вас")):
+        out = paths / f"nogap_{lang}.docx"
+        report_docx.build_docx(out, lang=lang)
+        text = "\n".join(p.text for p in docx.Document(out).paragraphs)
+        assert heading not in text
+
+
+def test_build_docx_sources_gap_uses_resolved_accent(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    from report_html import blend_with_white
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_gap_history(paths)                                 # has a brand-absent row
+    accent = "#2B6CB0"
+    soft = blend_with_white(accent, 0.10)[1:]
+    out = paths / "gap_accent.docx"
+    report_docx.build_docx(out, accent_color=accent)
+    doc = docx.Document(out)
+    gap = next(t for t in doc.tables if t.rows[0].cells[1].text == "source domain")
+    assert soft in gap._tbl.xml                             # gap row wears the tint
+    run = gap.rows[1].cells[1].paragraphs[0].runs[-1]       # [0] is the empty reset run
+    assert run.font.color.rgb == docx.shared.RGBColor.from_string("2B6CB0")
+
+    # brand present on every answer → no gap → no accent tint in the table
+    monkeypatch.setattr(gt, "RESULTS_CSV", paths / "nogap.csv")
+    gt.append_row(gt.make_row("gemini", "n1", "q1", answer={
+        "text": "example.com and blog.example.org",
+        "urls": ["https://example.com/a", "https://blog.example.org/b"],
+        "titles": ["example.com", "blog.example.org"], "model": "m"},
+        domains=["example.com"], articles={}))
+    rows = gt.load_results()                                # CSV-shaped string flags
+    out = paths / "nogap_accent.docx"
+    report_docx.build_docx(out, rows=rows, domains=["example.com"],
+                           niches={"n1": {"title": "T", "primary_domain": "example.com",
+                                          "queries": ["q1"]}},
+                           articles={}, accent_color=accent)
+    doc = docx.Document(out)
+    gap = next(t for t in doc.tables if t.rows[0].cells[1].text == "source domain")
+    assert "blog.example.org" in gap._tbl.xml
+    assert soft not in gap._tbl.xml

@@ -67,6 +67,30 @@ successful answers only.</p>
 </div>
 {% endif %}
 
+{% if sources_gap %}
+<h2>Top cited third-party sources — grounded</h2>
+<div class="card">
+<p class="small muted">Domains outside this brand's tracked list cited in grounded answers;
+sorted by distinct queries where no tracked domain appeared — highest-priority placement
+targets first.</p>
+{% for niche, gdata in sources_gap.items() %}
+<h3>{{ cfg.niches[niche].title }}
+  <span class="muted small">({{ gdata.total_queries }} grounded queries · {{ gdata.total_grounded }} answers)</span></h3>
+<table class="matrix">
+  <tr><th>Source domain</th><th>Cited in queries</th><th>Where brand absent</th><th>Engines</th></tr>
+  {% for s in gdata.sources %}
+  <tr>
+    <td class="mono">{{ s.domain }}</td>
+    <td class="mono">{{ s.queries }}/{{ gdata.total_queries }} ({{ s.answers }} ans.)</td>
+    <td class="mono">{{ s.gap_queries }} queries ({{ s.gap_answers }} ans.)</td>
+    <td class="mono">{{ s.engines | join(", ") }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+</div>
+{% endif %}
+
 {% if usage %}
 <h2>Resource usage — from receipts</h2>
 <div class="card">
