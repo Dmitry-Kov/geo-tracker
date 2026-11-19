@@ -261,6 +261,11 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <script>
 const D = __DATA__;
 
+/* Data strings (queries, titles, engine names) are untrusted: escape every
+   one before it goes into innerHTML. Numbers and fixed CSS classes pass
+   through String() unchanged. */
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
 document.getElementById('meta').textContent =
   `period ${D.dates[0]} — ${D.latest} · generated ${D.generated}`;
 if (D.notice) {
@@ -283,18 +288,18 @@ document.getElementById('kpis').innerHTML = [
   [D.engines.join(' · '), 'engines'],
   [`${lead[0]} — ${lead[1]}%`, 'visibility leader (current snapshot)', true],
 ].map(([v, l, acc]) =>
-  `<div class="kpi"><b class="${acc ? 'acc' : ''}">${v}</b><span>${l}</span></div>`).join('');
+  `<div class="kpi"><b class="${acc ? 'acc' : ''}">${esc(v)}</b><span>${esc(l)}</span></div>`).join('');
 
 /* Niche × domain matrix */
 const shade = p => p === 0 ? 'transparent'
   : `rgba(255,92,31,${(0.12 + 0.78 * p / 100).toFixed(2)})`;
 const fg = p => p > 55 ? '#fff' : 'var(--ink)';
 let html = '<tr><th></th>' +
-  D.domains.map(d => `<th class="dom">${d}</th>`).join('') + '</tr>';
+  D.domains.map(d => `<th class="dom">${esc(d)}</th>`).join('') + '</tr>';
 for (const [niche, info] of Object.entries(D.niches)) {
   const row = D.sov_current[niche];
   if (!row) continue;
-  html += `<tr><td class="niche">${info.title}</td>` + D.domains.map(d => {
+  html += `<tr><td class="niche">${esc(info.title)}</td>` + D.domains.map(d => {
     const p = row[d], pr = d === info.primary ? ' primary' : '';
     return `<td><span class="cell${pr}" style="background:${shade(p)};color:${fg(p)}">${p}%</span></td>`;
   }).join('') + '</tr>';
@@ -307,11 +312,11 @@ if (Object.values(D.audit).some(row => Object.keys(row).length)) {
   document.getElementById('auditSub').textContent =
     `Latest run ${D.latest}, grounded answers only (the engine ran a web search), all samples. ` +
     `The matrix above is a quick snapshot; this is the defensible number with its uncertainty.`;
-  let ah = '<tr><th></th>' + D.domains.map(d => `<th class="dom">${d}</th>`).join('') + '</tr>';
+  let ah = '<tr><th></th>' + D.domains.map(d => `<th class="dom">${esc(d)}</th>`).join('') + '</tr>';
   for (const [niche, info] of Object.entries(D.niches)) {
     const row = D.audit[niche];
     if (!row || !Object.keys(row).length) continue;
-    ah += `<tr><td class="niche">${info.title}</td>` + D.domains.map(d => {
+    ah += `<tr><td class="niche">${esc(info.title)}</td>` + D.domains.map(d => {
       const st = row[d];
       if (!st) return '<td>—</td>';
       const pr = d === info.primary ? ' primary' : '';
@@ -339,13 +344,13 @@ if (Object.values(D.audit).some(row => Object.keys(row).length)) {
 if (D.articles.length) {
   document.getElementById('articlesSec').hidden = false;
   document.getElementById('articles').innerHTML = '<tr><th></th>' +
-    D.engines.map(e => `<th class="dom">${e}</th>`).join('') + '<th>queries that cited it</th></tr>' +
-    D.articles.map(a => `<tr><td class="art">${a.title}<span class="eng">${a.url}</span></td>` +
+    D.engines.map(e => `<th class="dom">${esc(e)}</th>`).join('') + '<th>queries that cited it</th></tr>' +
+    D.articles.map(a => `<tr><td class="art">${esc(a.title)}<span class="eng">${esc(a.url)}</span></td>` +
       D.engines.map(e => {
         const n = a.by_engine[e] || 0;
         return `<td><span class="cell" style="background:${n ? 'var(--accent-soft)' : 'transparent'}">${n}</span></td>`;
       }).join('') +
-      `<td class="qs">${a.queries.map(q => `<span class="eng">${q.engine}</span> “${q.query}”`).join('<br>') || '—'}</td></tr>`
+      `<td class="qs">${a.queries.map(q => `<span class="eng">${esc(q.engine)}</span> “${esc(q.query)}”`).join('<br>') || '—'}</td></tr>`
     ).join('');
 }
 
@@ -387,9 +392,9 @@ new Chart(document.getElementById('engineChart'), {
 /* Hits */
 document.getElementById('hits').innerHTML = D.current_hits.length
   ? D.current_hits.map(h =>
-      `<li><span class="eng">${h.engine} · ${D.niches[h.niche].title}</span><br>` +
-      `“${h.query}”` +
-      h.domains.map(d => `<span class="tag">${d}</span>`).join('') + '</li>').join('')
+      `<li><span class="eng">${esc(h.engine)} · ${esc(D.niches[h.niche].title)}</span><br>` +
+      `“${esc(h.query)}”` +
+      h.domains.map(d => `<span class="tag">${esc(d)}</span>`).join('') + '</li>').join('')
   : '<li>No domains found in answers in the current snapshot.</li>';
 
 document.getElementById('foot').textContent =
@@ -408,5 +413,9 @@ def build_dashboard(rows: list, domains: list, niches: dict, out_path: Path,
     run that was cancelled or interrupted."""
     data = _prepare(rows, domains, niches, articles)
     data["notice"] = notice or ""
-    html = TEMPLATE.replace("__DATA__", json.dumps(data, ensure_ascii=False))
+    # "</" inside the inline JSON (a query or title containing "</script>")
+    # would close the <script> tag early and dump the rest as markup. "<\/"
+    # is the same string to the JS/JSON parser but invisible to the HTML one.
+    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    html = TEMPLATE.replace("__DATA__", payload)
     Path(out_path).write_text(html, encoding="utf-8")

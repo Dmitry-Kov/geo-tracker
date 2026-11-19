@@ -14,6 +14,7 @@
       <input type="hidden" name="big_confirmed" value="0">
       <button class="btn primary" type="submit" {{ "disabled" if busy }}>Run now</button>
     </form>
+    {% if other_busy %}<span class="mono small muted">(another run active)</span>{% endif %}
     <form method="post" action="/brands/{{ brand.id }}/delete" class="inline"
           onsubmit="return confirm('Delete brand and all its runs?')">
       <button class="btn danger" type="submit">Delete</button>

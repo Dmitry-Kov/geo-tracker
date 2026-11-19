@@ -21,6 +21,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
                                RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import text
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -63,10 +64,14 @@ def allowed_hosts():
     return None if os.environ.get("APP_PASSWORD") else LOOPBACK_HOSTS
 
 
-def request_guard_error(method: str, headers) -> tuple:
+def request_guard_error(method: str, headers, path: str = "") -> tuple:
     """(status, message) if the request must be refused, else None.
 
-    1. Host must be an allowed name (see allowed_hosts).
+    1. Host must be an allowed name (see allowed_hosts). One narrow exception:
+       GET/HEAD /healthz on a loopback name. A container healthcheck has no
+       session cookie and addresses 127.0.0.1 even when APP_ALLOWED_HOSTS
+       lists only the public domain. The exception is read-only, loopback
+       only and /healthz only — GET / on loopback is still refused then.
     2. A state-changing request that a browser sent from another site is
        refused: its Origin (or Referer) names a different host than the one
        it is addressed to. Requests without either header are not browser
@@ -76,8 +81,11 @@ def request_guard_error(method: str, headers) -> tuple:
     hostname = urlsplit("//" + host).hostname or ""
     allowed = allowed_hosts()
     if allowed is not None and hostname not in allowed:
-        return 400, ("host not allowed — set APP_ALLOWED_HOSTS (and APP_PASSWORD) "
-                     "to serve this name")
+        healthz = (path == "/healthz" and method.upper() in ("GET", "HEAD")
+                   and hostname in LOOPBACK_HOSTS)
+        if not healthz:
+            return 400, ("host not allowed — set APP_ALLOWED_HOSTS (and APP_PASSWORD) "
+                         "to serve this name")
     if method.upper() not in SAFE_METHODS:
         source = headers.get("origin") or headers.get("referer")
         if source is not None and urlsplit(source).netloc.lower() != host:
@@ -236,8 +244,15 @@ def _brand_history(brand, runs, cache: dict = None) -> tuple:
     done = sorted((r for r in runs if r.status == "done"), key=lambda r: r.id)
     hist: dict = {}
     last_basis: dict = {}
+    # A niche removed from the brand lives on in its done runs' snapshots;
+    # keep the latest snapshot title so its history stays human-readable.
+    snap_titles: dict = {}
     for r in done:
         stats, day, cfg = _run_history_point(r, cache)
+        for niche, ncfg in (cfg.get("niches") or {}).items():
+            title = (ncfg or {}).get("title")
+            if title:
+                snap_titles[niche] = title  # done runs ascend by id: latest wins
         for niche, by_dom in stats.items():
             for d, st in by_dom.items():
                 cur = dynamics.basis(cfg, d)
@@ -247,7 +262,8 @@ def _brand_history(brand, runs, cache: dict = None) -> tuple:
                     {"run_id": r.id, "label": f"#{r.id} · {day}", "break": why, **st})
     history_json = {}
     for niche, by_dom in hist.items():
-        title = (brand.niches.get(niche) or {}).get("title", niche)
+        title = ((brand.niches.get(niche) or {}).get("title")
+                 or snap_titles.get(niche) or niche)
         history_json[niche] = {"title": title, "domains": {
             d: {"labels": [p["label"] for p in pts],
                 "point": [p["point"] for p in pts],
@@ -291,7 +307,8 @@ def create_app(db_path=None) -> FastAPI:
 
     @app.middleware("http")
     async def request_guard(request: Request, call_next):
-        refused = request_guard_error(request.method, request.headers)
+        refused = request_guard_error(request.method, request.headers,
+                                      request.url.path)
         if refused:
             return PlainTextResponse(refused[1], status_code=refused[0])
         return await call_next(request)
@@ -321,6 +338,23 @@ def create_app(db_path=None) -> FastAPI:
         base.update(ctx or {})
         return TEMPLATES.TemplateResponse(request, template, base,
                                           status_code=status, headers=headers)
+
+    def brand_form_context(s, b, values, error=""):
+        """The complete brand_form.html context for an existing brand — runs,
+        history, compare selectors and estimate included, so an error page is
+        the same page with a banner, not a stripped-down form.
+
+        The active slot is GLOBAL (Run.active is unique across all brands):
+        any brand's pending/running run disables Run now on every brand."""
+        runs = list(b.runs)
+        active_run = s.query(Run).filter(Run.active == 1).first()
+        busy = any(r.status in WAITING for r in runs) or active_run is not None
+        history_json, done_list = _brand_history(b, runs, history_cache)
+        return {"brand": b, "values": values, "error": error,
+                "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy,
+                "other_busy": active_run is not None and active_run.brand_id != b.id,
+                "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM,
+                "history_json": history_json, "done_list": done_list}
 
     # -- auth ---------------------------------------------------------------
     @app.get("/login", response_class=HTMLResponse)
@@ -352,6 +386,21 @@ def create_app(db_path=None) -> FastAPI:
     def logout(request: Request):
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
+
+    # -- health ---------------------------------------------------------------
+    # GET and HEAD: FastAPI (unlike plain Starlette) does not add HEAD to a
+    # GET route on its own, and the host guard exempts both for healthchecks.
+    @app.api_route("/healthz", methods=["GET", "HEAD"],
+                   response_class=PlainTextResponse)
+    def healthz():
+        """Liveness + database check for container healthchecks. Deliberately
+        without auth_guard: a healthcheck has no session cookie. Answers only
+        when the process serves AND the database executes a query; exposes no
+        data. The host guard lets loopback GET/HEAD reach it even when
+        APP_ALLOWED_HOSTS lists only the public domain (see request_guard_error)."""
+        with Session() as s:
+            s.execute(text("SELECT 1"))
+        return "ok"
 
     # -- brands -------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
@@ -401,14 +450,8 @@ def create_app(db_path=None) -> FastAPI:
             b = s.get(Brand, brand_id)
             if b is None:
                 raise HTTPException(404, "brand not found")
-            runs = list(b.runs)
-            busy = any(r.status in WAITING for r in runs)
-            history_json, done_list = _brand_history(b, runs, history_cache)
             return render(request, "brand_form.html",
-                          {"brand": b, "values": form_values(brand=b), "error": "",
-                           "engines_all": list(gt.ENGINES), "runs": runs, "busy": busy,
-                           "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM,
-                           "history_json": history_json, "done_list": done_list})
+                          brand_form_context(s, b, form_values(brand=b)))
 
     @app.get("/brands/{brand_id}/compare", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     def compare_page(request: Request, brand_id: int, a: int = None, b: int = None):
@@ -447,12 +490,15 @@ def create_app(db_path=None) -> FastAPI:
             b = s.get(Brand, brand_id)
             if b is None:
                 raise HTTPException(404, "brand not found")
+            # names are UNIQUE: refuse a rename onto another brand's name
+            # with a form error instead of an IntegrityError crash.
+            if not error and s.query(Brand).filter(
+                    Brand.name == cfg["name"], Brand.id != brand_id).first():
+                error = "a brand with this name already exists"
             if error:
                 return render(request, "brand_form.html",
-                              {"brand": b, "values": form_values(form=form),
-                               "error": error, "engines_all": list(gt.ENGINES),
-                               "runs": list(b.runs), "busy": False,
-                               "estimate": run_estimate(b), "big_confirm": BIG_RUN_CONFIRM}, status=400)
+                              brand_form_context(s, b, form_values(form=form), error),
+                              status=400)
             for k, v in cfg.items():
                 setattr(b, k, v)
             s.commit()
@@ -460,11 +506,23 @@ def create_app(db_path=None) -> FastAPI:
         return RedirectResponse(f"/brands/{brand_id}", status_code=303)
 
     @app.post("/brands/{brand_id}/delete", dependencies=[Depends(auth_guard)])
-    def brand_delete(brand_id: int):
+    def brand_delete(brand_id: int, request: Request):
         with Session() as s:
             b = s.get(Brand, brand_id)
             if b is None:
                 raise HTTPException(404, "brand not found")
+            runs = list(b.runs)
+            if any(r.status in WAITING or r.active == 1 for r in runs):
+                # A live execute_run thread (or a queued tick about to start)
+                # still writes to these rows — deleting the brand underneath
+                # it would orphan its answers or crash it. Refuse until the
+                # run is cancelled or finishes.
+                return render(request, "brand_form.html",
+                              brand_form_context(
+                                  s, b, form_values(brand=b),
+                                  "cannot delete a brand while its run is active "
+                                  "or queued — cancel the run first"),
+                              status=409)
             s.delete(b)
             s.commit()
         sync_schedule(brand_id, "")

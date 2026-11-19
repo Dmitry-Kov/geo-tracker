@@ -1,0 +1,40 @@
+# geo-tracker service behind Caddy (automatic HTTPS).
+# .env holds the API keys and APP_* settings (see .env.example);
+# APP_DOMAIN here is the public name Caddy serves.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file: .env
+    environment:
+      - GEO_DB_PATH=/data/geo_tracker.db
+    volumes:
+      - "${GEO_DATA_DIR:-./data}:/data"
+    # No public ports: the app is reachable only through caddy on the
+    # internal compose network. That is what makes uvicorn's
+    # --forwarded-allow-ips=* safe — clients cannot spoof X-Forwarded-For
+    # by hitting port 8000 directly.
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      - APP_DOMAIN=${APP_DOMAIN:-localhost}
+    # TCP only — never 443/udp (see docker/Caddyfile: protocols h1 h2).
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

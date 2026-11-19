@@ -1,0 +1,12 @@
+# TCP only (h1 h2): no HTTP/3, so Caddy never binds 443/udp nor advertises
+# Alt-Svc: h3 — co-hosted VPNs commonly own 443/udp on the same server.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$APP_DOMAIN:localhost} {
+	encode zstd gzip
+	reverse_proxy app:8000
+}

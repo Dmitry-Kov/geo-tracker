@@ -456,6 +456,39 @@ the service does not need it.
   `alembic revision --autogenerate -m "..."` and review the result
   (batch mode is on for SQLite ALTERs).
 
+### Docker deployment (VPS)
+
+`Dockerfile` + `docker-compose.yml` run the service as a non-root container
+(UID/GID `10001`) behind Caddy with automatic HTTPS:
+
+```bash
+mkdir -p data && chown 10001:10001 data  # when running as root on Linux:
+                                         # the container must be able to write /data
+cp .env.example .env                     # then set in .env:
+#   APP_DOMAIN=geo.example.com           # public name Caddy serves
+#   APP_ALLOWED_HOSTS=geo.example.com    # the app answers to this name only
+#   APP_PASSWORD=…  APP_SECRET=…         # login + stable session key
+#   APP_HTTPS_ONLY=1                     # TLS terminates at Caddy
+docker compose up -d --build
+```
+
+- `/data` (host directory: `GEO_DATA_DIR`, default `./data`) holds
+  `geo_tracker.db` (SQLite, WAL) and `backups/` — the whole history lives
+  there; back it up. The compose file sets `GEO_DB_PATH=/data/geo_tracker.db`.
+- **One process, no `--workers`**: the scheduler, the run queue and the login
+  limiter live in it. The app port is not published to the host — only Caddy
+  reaches it on the internal compose network. That is why uvicorn runs with
+  `--proxy-headers --forwarded-allow-ips=*`: no client can hit port 8000
+  directly, so `X-Forwarded-For` cannot be spoofed and the login limiter sees
+  real client addresses.
+- **Caddy is TCP-only** (`protocols h1 h2`, ports `80/tcp` + `443/tcp`): no
+  HTTP/3, so it never binds `443/udp` nor advertises `Alt-Svc: h3` — co-hosted
+  VPNs commonly own `443/udp` on the same server.
+- `GET /healthz` answers `ok` (plain text) after a `SELECT 1` on the database.
+  It needs no login — Docker's `HEALTHCHECK` uses it over loopback, which the
+  host guard allows for `GET`/`HEAD` even when `APP_ALLOWED_HOSTS` lists only
+  the public name. Every other page keeps the exact host list and the login.
+
 Slice-1 limits, stated honestly: one run
 at a time, single user, single process (the login limiter, the run queue and
 the scheduler live in it). Trends across runs, users and

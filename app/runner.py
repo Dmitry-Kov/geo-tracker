@@ -256,8 +256,10 @@ def execute_run(Session, run_id: int) -> None:
         total = (sum(len(ncfg["queries"]) for ncfg in cfg["niches"].values())
                  * len(engines) * cfg["samples"])
         with Session() as s:
-            s.get(Run, run_id).total_calls = total
-            s.commit()
+            run_row = s.get(Run, run_id)
+            if run_row is not None:
+                run_row.total_calls = total
+                s.commit()
 
         for niche, ncfg in cfg["niches"].items():
             for query in ncfg["queries"]:
@@ -268,8 +270,11 @@ def execute_run(Session, run_id: int) -> None:
                     for sample in range(1, cfg["samples"] + 1):
                         # Cancellation is honored between calls: the answer
                         # in flight finishes, everything collected is kept.
+                        # A run row that is gone (deleted underneath us) is
+                        # treated like a cancel: stop instead of crashing.
                         with Session() as s:
-                            if s.get(Run, run_id).cancel_requested:
+                            run_row = s.get(Run, run_id)
+                            if run_row is None or run_row.cancel_requested:
                                 raise _Cancelled()
                         answer, status = None, "ok"
                         try:
@@ -314,7 +319,9 @@ def execute_run(Session, run_id: int) -> None:
                             for k in cfg["articles"]:
                                 if row[f"art_{k}"]:
                                     s.add(ArticleHit(answer_id=a.id, article_key=k))
-                            s.get(Run, run_id).done_calls += 1
+                            run_row = s.get(Run, run_id)
+                            if run_row is not None:
+                                run_row.done_calls += 1
                             s.commit()
                         if engine in dead:
                             break
@@ -331,8 +338,9 @@ def execute_run(Session, run_id: int) -> None:
                 os.environ[key] = val
         with Session() as s:
             run = s.get(Run, run_id)
-            run.status = "cancelled" if cancelled else ("error" if error else "done")
-            run.error = error or ""
-            run.active = None  # free the slot for the next run
-            run.finished_at = utcnow()
-            s.commit()
+            if run is not None:  # the row may have been deleted mid-run
+                run.status = "cancelled" if cancelled else ("error" if error else "done")
+                run.error = error or ""
+                run.active = None  # free the slot for the next run
+                run.finished_at = utcnow()
+                s.commit()

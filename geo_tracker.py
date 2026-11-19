@@ -377,11 +377,20 @@ def ask_perplexity(query: str, geo: str = "") -> dict:
         payload=payload,
     )
     text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-    urls = list(data.get("citations") or [])
+    # citations and search_results usually repeat the same URLs: keep each
+    # source once, first-seen order, so n_sources and receipts count pages,
+    # not API fields. Hit booleans (src/txt/article) are unaffected by repeats.
+    urls, seen = [], set()
+    for u in data.get("citations") or []:
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
     titles = []
     for sr in data.get("search_results") or []:
-        if sr.get("url"):
-            urls.append(sr["url"])
+        u = sr.get("url")
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
         if sr.get("title"):
             titles.append(sr["title"])
     return {"text": text, "urls": urls, "titles": titles,
