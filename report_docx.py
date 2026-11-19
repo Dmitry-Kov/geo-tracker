@@ -40,7 +40,8 @@ try:
 except ImportError:
     ARTICLES = {}
 from report_html import DEFAULT_ACCENT, blend_with_white, resolve_branding
-from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
+from sov_stats import (sov_stats, unowned_cited_sources, DEFAULT_B, DEFAULT_SEED,
+                       MIN_BOOTSTRAP_QUERIES)
 
 BASE_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = BASE_DIR / "results.csv"
@@ -236,6 +237,11 @@ STRINGS = {
                          "in the current snapshot cited each page, and for which queries.",
         "art_cols": ["article", "answers", "engines", "queries"],
         "art_none": "not cited",
+        "h_sources_gap": "Top cited third-party sources",
+        "sources_gap_note": "Untracked domains cited in grounded answers of the latest "
+                            "run {latest} — who engines rely on instead of you, ranked "
+                            "by distinct queries where no tracked domain appeared.",
+        "sg_cols": ["niche", "source domain", "queries cited", "brand absent", "engines"],
         "h_leaderboard": "Domain leaderboard",
         "lb_cols": ["domain", "SOV", "note"],
         "lb_niches": "niches: {names}",
@@ -289,6 +295,11 @@ STRINGS = {
                          "текущего среза сослались на каждую и по каким запросам.",
         "art_cols": ["статья", "ответов", "движки", "запросы"],
         "art_none": "не цитируется",
+        "h_sources_gap": "Кого цитируют вместо вас (сторонние источники)",
+        "sources_gap_note": "Неотслеживаемые домены среди источников grounded-ответов "
+                            "последнего прогона {latest} — отсортированы по числу "
+                            "уникальных запросов, где ваш бренд не попал в ответ.",
+        "sg_cols": ["ниша", "домен-источник", "запросов", "без бренда", "движки"],
         "h_leaderboard": "Общий зачёт по доменам",
         "lb_cols": ["домен", "SOV", "комментарий"],
         "lb_niches": "ниши: {names}",
@@ -472,6 +483,38 @@ def build_docx(out_path: Path, lang: str = "en", *, rows: list = None,
             fill_cell(at.rows[i].cells[3],
                       "\n".join(f"{r['engine']}: {r['query']}" for r in cited) or T["art_none"],
                       size=8.5, color=INK if cited else MUTED, center=False)
+
+    # Third-party citation gap: untracked domains in grounded answers of the
+    # latest run — who the engines rely on instead of the tracked domains.
+    # Rows where the brand was absent wear the resolved accent.
+    sources_gap = unowned_cited_sources(latest_ok, domains, niches, limit=10)
+    if sources_gap:
+        heading(doc, T["h_sources_gap"])
+        para(doc, T["sources_gap_note"].format(latest=latest), size=9, color=MUTED)
+        unit = "ans." if lang == "en" else "отв."
+        n_rows = 1 + sum(len(g["sources"]) for g in sources_gap.values())
+        sgt = make_table(doc, n_rows, 5)
+        header_row(sgt, T["sg_cols"])
+        r_i = 1
+        for niche, g in sources_gap.items():
+            for s in g["sources"]:
+                gap = s["gap_queries"] > 0
+                fill_cell(sgt.rows[r_i].cells[0], niches[niche]["title"],
+                          size=8.5, center=False)
+                fill_cell(sgt.rows[r_i].cells[1], s["domain"], font=F_MONO, size=8.5,
+                          bold=gap, color=accent_rgb if gap else INK,
+                          fill=accent_soft if gap else None, center=False)
+                fill_cell(sgt.rows[r_i].cells[2],
+                          f"{s['queries']}/{g['total_queries']} ({s['answers']} {unit})",
+                          font=F_MONO, size=8.5)
+                fill_cell(sgt.rows[r_i].cells[3],
+                          f"{s['gap_queries']} ({s['gap_answers']} {unit})",
+                          font=F_MONO, size=8.5, bold=gap,
+                          color=accent_rgb if gap else MUTED,
+                          fill=accent_soft if gap else None)
+                fill_cell(sgt.rows[r_i].cells[4], ", ".join(s["engines"]),
+                          font=F_MONO, size=8, center=False)
+                r_i += 1
 
     # Overall leaderboard
     heading(doc, T["h_leaderboard"])

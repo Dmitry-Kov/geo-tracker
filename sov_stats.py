@@ -144,3 +144,79 @@ def format_ci(st: dict) -> str:
     """'17.0% [9.0–28.0] (nq=10, n=30)' — the defensible one-line form."""
     return (f"{st['point']:.1f}% [{st['lo']:.1f}–{st['hi']:.1f}] "
             f"(nq={st['n_queries']}, n={st['n_samples']})")
+
+
+def _host_matches_tracked(host: str, tracked: list) -> bool:
+    """True if host IS a tracked domain or a subdomain of one.
+
+    Exact host + subdomains only, after lowercasing and stripping a leading
+    "www." on both sides: lookalikes (1brand.io, my-brand.io, brand.io.evil.com)
+    are third-party sources, not the brand.
+    """
+    h = host.strip().lower()
+    h = h[4:] if h.startswith("www.") else h
+    for dom in tracked:
+        d = dom.strip().lower()
+        d = d[4:] if d.startswith("www.") else d
+        if d and (h == d or h.endswith("." + d)):
+            return True
+    return False
+
+
+def unowned_cited_sources(rows: list, domains: list, niches, *, limit: int = 10) -> dict:
+    """{niche: {total_grounded, total_queries, sources: [...]}} — who the engines
+    cite instead of the tracked domains.
+
+    Grounded ok rows only (the engine ran a web search). Per niche, every
+    third-party host in all_source_domains (the raw record of what was cited,
+    tracked or not) is counted in answers and in distinct queries, overall and
+    restricted to answers where NO tracked domain appeared (src or txt) — the
+    placement-gap view. The unit of evidence stays the query: repeated samples
+    of one query add answers, never queries.
+
+    Sources are sorted by (-gap_queries, -queries, -answers, domain) and cut to
+    limit (a non-positive limit keeps all). Niches without a single third-party
+    source are omitted. Pure aggregation of stored fields: matching rules are
+    not touched, so MATCH_RULES_VERSION does not change.
+    """
+    grounded = [r for r in rows if r.get("status") == "ok" and is_grounded(r)]
+    out: dict = {}
+    for niche in niches:
+        sub = [r for r in grounded if r.get("niche") == niche]
+        if not sub:
+            continue
+        total_grounded = len(sub)
+        total_queries = len({r["query"] for r in sub})
+        agg: dict = {}
+        for r in sub:
+            brand_missed = not any(hit(r, d) for d in domains)
+            seen = set()
+            for host in (r.get("all_source_domains") or "").split(";"):
+                h = host.strip().lower()
+                h = h[4:] if h.startswith("www.") else h
+                if not h or h in seen:
+                    continue
+                seen.add(h)  # one host counts once per answer, however repeated
+                if _host_matches_tracked(h, domains):
+                    continue
+                a = agg.setdefault(h, {"answers": 0, "queries": set(),
+                                       "gap_answers": 0, "gap_queries": set(),
+                                       "engines": set()})
+                a["answers"] += 1
+                a["queries"].add(r["query"])
+                if brand_missed:
+                    a["gap_answers"] += 1
+                    a["gap_queries"].add(r["query"])
+                a["engines"].add(r["engine"])
+        items = [{"domain": h, "answers": a["answers"], "queries": len(a["queries"]),
+                  "gap_answers": a["gap_answers"], "gap_queries": len(a["gap_queries"]),
+                  "engines": sorted(a["engines"])}
+                 for h, a in agg.items()]
+        items.sort(key=lambda x: (-x["gap_queries"], -x["queries"],
+                                  -x["answers"], x["domain"]))
+        if limit > 0:
+            items = items[:limit]
+        if items:
+            out[niche] = {"total_grounded": total_grounded,
+                          "total_queries": total_queries, "sources": items}
+    return out

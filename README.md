@@ -42,7 +42,10 @@ detection to fight.
   the geo is recorded as requested, not applied — a documented limitation of
   this tracker
 - Every source domain is recorded, tracked or not (`all_source_domains`), so
-  you can see who the engines cite *instead* of you
+  you can see who the engines cite *instead* of you: the run page, HTML
+  dashboard and DOCX report carry a **top cited third-party sources** table —
+  untracked domains in grounded answers of the latest run, ranked by distinct
+  queries where no tracked domain appeared (your placement targets)
 - Raw answers archived to `answers.jsonl`, keyed to their CSV row — re-read
   what an engine actually said without burning quota on a re-query that
   would return something different anyway
@@ -283,7 +286,9 @@ requested geo and which engines applied it) and a **resource-usage** summary
 per engine (calls, tokens, executed searches, API-reported cost — from the
 raw receipts), and writes `dashboard.html` —
 a single self-contained file (Chart.js loads from a CDN, so opening it needs
-internet) with the same audit section.
+internet) with the same audit section plus a **top cited third-party sources**
+table (untracked domains cited in grounded answers of the latest run, ranked
+by distinct queries where no tracked domain appeared).
 
 ### `manual-export` / `manual-import` — engines without an API
 
@@ -307,7 +312,9 @@ python report_docx.py [--out PATH] [--lang en|ru] [--brand NAME] [--accent #RRGG
 
 Builds a formatted DOCX report from the latest run: KPI row, visibility
 matrix, measurement uncertainty (95% CI + methodology + provenance), article
-citations (when `ARTICLES` is set), engine comparison, auto-derived findings.
+citations (when `ARTICLES` is set), top cited third-party sources (when
+grounded answers cite untracked domains), engine comparison, auto-derived
+findings.
 
 **White-label branding.** `--brand` / `--accent` (both report commands) or
 `REPORT_BRAND` / `REPORT_ACCENT` in `.env` set the publisher name and the

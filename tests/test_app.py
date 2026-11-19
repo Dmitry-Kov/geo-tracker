@@ -539,6 +539,115 @@ def test_run_config_snapshots_the_matching_rules_version(client):
         assert cfg["match_rules_version"] == gt.MATCH_RULES_VERSION == 2
 
 
+# ---------------------------------------------------------------------------
+# Top cited third-party sources: run-page counts, snapshot, incomplete notice
+# ---------------------------------------------------------------------------
+
+def rival_answer(query, geo=""):
+    # "q one": the brand is cited alongside a third party; "q two": it is not.
+    hosts = ["news.example.net"]
+    hosts += ["brand.io"] if query == "q one" else ["review.example.org"]
+    return {"text": f"about {query}",
+            "urls": [f"https://{h}/page" for h in hosts],
+            "titles": hosts, "model": "fake-model",
+            "usage": {"total_tokens": 10}, "searches": 1}
+
+
+def gap_section(page):
+    return page.split("Top cited third-party sources")[1].split("Resource usage")[0]
+
+
+def test_run_page_shows_third_party_sources_gap(client, env):
+    for e in gt.ENGINES:
+        env.setitem(gt.ENGINES[e], "fn", rival_answer)
+    brand_id = create_brand(client, engines=["gemini"])
+    client.post(f"/brands/{brand_id}/run")
+    page = client.get("/runs/1").text
+    assert "Top cited third-party sources — grounded" in page
+    assert "2 grounded queries · 2 answers" in page
+    # news.example.net: both queries, brand absent on one of them;
+    # review.example.org: only the brand-absent query
+    assert "2/2 (2 ans.)" in page
+    assert "1/2 (1 ans.)" in page
+    assert page.count("1 queries (1 ans.)") == 2
+    section = gap_section(page)
+    assert section.index("news.example.net") < section.index("review.example.org")
+    assert "gemini" in section
+
+    data = dashboard_data(client.get("/runs/1/report.html").text)
+    assert data["sources_gap"]["main"] == {
+        "total_grounded": 2, "total_queries": 2,
+        "sources": [
+            {"domain": "news.example.net", "answers": 2, "queries": 2,
+             "gap_answers": 1, "gap_queries": 1, "engines": ["gemini"]},
+            {"domain": "review.example.org", "answers": 1, "queries": 1,
+             "gap_answers": 1, "gap_queries": 1, "engines": ["gemini"]}]}
+    docx = pytest.importorskip("docx")
+    r = client.get("/runs/1/report.docx?lang=en")
+    text = "\n".join(p.text for p in docx.Document(io.BytesIO(r.content)).paragraphs)
+    assert "Top cited third-party sources" in text
+
+
+def test_sources_gap_respects_the_run_snapshot(client, env):
+    for e in gt.ENGINES:
+        env.setitem(gt.ENGINES[e], "fn", rival_answer)
+    brand_id = create_brand(client, engines=["gemini"])
+    client.post(f"/brands/{brand_id}/run")
+    assert "news.example.net" in gap_section(client.get("/runs/1").text)
+
+    # the brand later starts tracking the rival and renames the niche: the
+    # finished run must still be read against the config it was measured with
+    r = client.post(f"/brands/{brand_id}",
+                    data={**BRAND_FORM, "engines": ["gemini"],
+                          "domains": "brand.io\nother.org\nnews.example.net",
+                          "niche_title": "Renamed niche"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    after = client.get("/runs/1").text
+    section = gap_section(after)
+    assert "news.example.net" in section                    # untracked THEN → shown
+    assert "review.example.org" in section
+    assert "2/2 (2 ans.)" in section and "1 queries (1 ans.)" in section
+    assert "Main niche" in section and "Renamed niche" not in section
+
+    # a NEW run under the new config no longer lists the now-tracked rival
+    client.post(f"/brands/{brand_id}/run")
+    fresh = gap_section(client.get("/runs/2").text)
+    assert "news.example.net" not in fresh
+    assert "review.example.org" in fresh
+
+
+def test_sources_gap_of_a_cancelled_run_still_says_incomplete(client, env):
+    brand_id = create_brand(client, engines=["gemini"])
+    Session = client.app.state.Session
+    run_id = runner.start_run(Session, brand_id)
+    calls = []
+
+    def ask_then_cancel(query, geo=""):
+        calls.append(query)
+        if len(calls) == 1:
+            with Session() as s:
+                s.get(Run, run_id).cancel_requested = 1
+                s.commit()
+        return rival_answer(query, geo)
+
+    env.setitem(gt.ENGINES["gemini"], "fn", ask_then_cancel)
+    runner.execute_run(Session, run_id)
+    page = client.get(f"/runs/{run_id}").text
+    assert "Incomplete run — cancelled: 1 of 2 planned calls" in page
+    assert "Top cited third-party sources — grounded" in page
+    assert "news.example.net" in gap_section(page)          # collected answer kept
+
+    dash = client.get(f"/runs/{run_id}/report.html").text
+    assert "Incomplete run" in dash
+    assert dashboard_data(dash)["sources_gap"]["main"]["total_grounded"] == 1
+    docx = pytest.importorskip("docx")
+    r = client.get(f"/runs/{run_id}/report.docx?lang=en")
+    text = "\n".join(p.text for p in docx.Document(io.BytesIO(r.content)).paragraphs)
+    assert "Incomplete run — cancelled" in text
+    assert "Top cited third-party sources" in text
+
+
 def test_run_crossing_utc_midnight_is_reported_whole(client):
     from report_html import _prepare
     brand_id = create_brand(client, engines=["gemini"])

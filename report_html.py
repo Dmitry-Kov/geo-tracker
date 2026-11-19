@@ -16,7 +16,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
+from sov_stats import (sov_stats, unowned_cited_sources, DEFAULT_B, DEFAULT_SEED,
+                       MIN_BOOTSTRAP_QUERIES)
 
 # Default accent; a custom one replaces only the first domain color below.
 DEFAULT_ACCENT = "#FF5C1F"
@@ -157,6 +158,9 @@ def _prepare(rows: list, domains: list, niches: dict, articles: dict = None) -> 
     # The snapshot above keeps its semantics; this section is additive.
     latest_ok = [r for r in ok if r["run_date"] == latest]
     audit = sov_stats(latest_ok, domains, niches, grounded=True)
+    # Who the engines cite instead of the tracked domains: same grounded,
+    # all-samples channel as the audit table above.
+    sources_gap = unowned_cited_sources(latest_ok, domains, niches, limit=10)
     audit_meta = {
         "B": DEFAULT_B, "seed": DEFAULT_SEED, "min_bootstrap": MIN_BOOTSTRAP_QUERIES,
         "models": sorted({r.get("model") or "" for r in latest_ok} - {""}),
@@ -186,6 +190,7 @@ def _prepare(rows: list, domains: list, niches: dict, articles: dict = None) -> 
         "articles": article_rows,
         "audit": audit,
         "audit_meta": audit_meta,
+        "sources_gap": sources_gap,
     }
 
 
@@ -273,6 +278,12 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <h2>Article citations</h2>
 <div class="sub">Tracked pages found among the answer's sources: how many answers cited each page, by engine. Current snapshot, like the matrix above.</div>
 <table class="matrix" id="articles"></table>
+</section>
+
+<section id="sourcesSec" hidden>
+<h2>Top cited third-party sources</h2>
+<div class="sub">Untracked domains cited in grounded answers of the latest run — who engines rely on instead of you, sorted by distinct queries where no tracked domain appeared.</div>
+<table class="matrix" id="sourcesGap"></table>
 </section>
 
 <section id="trendSec"__TREND_HIDDEN__>
@@ -406,6 +417,30 @@ if (D.articles.length) {
       }).join('') +
       `<td class="qs">${a.queries.map(q => `<span class="eng">${esc(q.engine)}</span> “${esc(q.query)}”`).join('<br>') || '—'}</td></tr>`
     ).join('');
+}
+
+/* Third-party citation gap: untracked domains in grounded answers of the
+   latest run, ranked by distinct queries where no tracked domain appeared.
+   Every data string (niche title, source domain, engine names) goes through
+   esc(); counts are numbers and the tint is the validated accent. */
+if (Object.keys(D.sources_gap || {}).length > 0) {
+  document.getElementById('sourcesSec').hidden = false;
+  let sg = '<tr><th>niche</th><th class="dom">source domain</th>' +
+    '<th>cited in queries</th><th>where brand absent</th><th>engines</th></tr>';
+  for (const [niche, g] of Object.entries(D.sources_gap)) {
+    const info = D.niches[niche] || {title: niche};
+    g.sources.forEach((s, i) => {
+      const tint = s.gap_queries > 0 ? ` style="background:${D.accent_soft}"` : '';
+      sg += '<tr>' +
+        (i === 0 ? `<td class="niche" rowspan="${g.sources.length}">${esc(info.title)}` +
+          `<span class="ci">${g.total_queries} grounded queries · ${g.total_grounded} answers</span></td>` : '') +
+        `<td class="art"${tint}>${esc(s.domain)}</td>` +
+        `<td${tint}>${s.queries}/${g.total_queries} (${s.answers} ans.)</td>` +
+        `<td${tint}>${s.gap_queries} queries (${s.gap_answers} ans.)</td>` +
+        `<td class="eng">${esc(s.engines.join(', '))}</td></tr>`;
+    });
+  }
+  document.getElementById('sourcesGap').innerHTML = sg;
 }
 
 /* Trend: a single date is a point, not a trend — the section stays hidden
