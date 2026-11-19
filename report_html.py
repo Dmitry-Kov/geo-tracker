@@ -3,16 +3,53 @@
 HTML dashboard generator for the GEO tracker.
 A single self-contained dashboard.html: data is inlined as JSON,
 charts are Chart.js from a CDN (opening the file requires internet).
+
+White-label: the publisher name comes from REPORT_BRAND (.env) or the
+report_brand argument, the accent color from REPORT_ACCENT / accent_color
+(#RRGGBB, default #FF5C1F). Unset, the report renders neutral GEO Monitor
+chrome. report_docx shares this resolution.
 """
 
 import json
+import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 from sov_stats import sov_stats, DEFAULT_B, DEFAULT_SEED, MIN_BOOTSTRAP_QUERIES
 
+# Default accent; a custom one replaces only the first domain color below.
+DEFAULT_ACCENT = "#FF5C1F"
+
 # Brand colors for domains on charts (stable across reports)
-DOMAIN_COLORS = ["#FF5C1F", "#1F7A8C", "#6A4C93", "#2A9D8F", "#E0A100", "#D62246"]
+DOMAIN_COLORS = [DEFAULT_ACCENT, "#1F7A8C", "#6A4C93", "#2A9D8F", "#E0A100", "#D62246"]
+
+
+def resolve_branding(brand: str = None, accent: str = None) -> tuple:
+    """(publisher brand, validated #RRGGBB accent) for a report.
+
+    Explicit arguments win; None falls back to REPORT_BRAND / REPORT_ACCENT
+    from the environment (.env). The brand is stripped; the accent must be
+    exactly #RRGGBB — anything else (empty, malformed, CSS injection) falls
+    back to DEFAULT_ACCENT, so env input can never reach CSS or RGBColor
+    unchecked.
+    """
+    if brand is None:
+        brand = os.environ.get("REPORT_BRAND", "")
+    brand = (brand or "").strip()
+    if accent is None:
+        accent = os.environ.get("REPORT_ACCENT", "")
+    accent = (accent or "").strip()
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", accent):
+        accent = DEFAULT_ACCENT
+    return brand, accent
+
+
+def blend_with_white(hex_color: str, frac: float) -> str:
+    """#RRGGBB mixed with white (frac = share of the color), as #RRGGBB.
+    Used for the soft tint (10%) and the mid fill (35%) of the accent."""
+    rgb = [int(hex_color[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(frac * c + (1 - frac) * 255):02X}" for c in rgb)
 
 # A trend point is drawn for a date only if that date covers at least this
 # fraction of the busiest date's ok-answer count. Keeps gap-fill days (a small
@@ -157,14 +194,14 @@ TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GEO Monitor · Optimize.uz</title>
+<title>GEO Monitor</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
 <style>
 :root{
   --paper:#F6F7F4; --card:#FFFFFF; --ink:#16181D; --muted:#6B7180;
-  --line:#E4E6E0; --accent:#FF5C1F; --accent-soft:#FFF0E9;
+  --line:#E4E6E0; --accent:#FF5C1F; --accent-soft:#FFEFE9;
   --mono:'JetBrains Mono',ui-monospace,monospace;
 }
 *{box-sizing:border-box;margin:0}
@@ -212,7 +249,7 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <body>
 <div class="wrap">
 <header><div class="brand">
-  <h1>Optimize<span class="dot">.</span>uz&ensp;GEO Monitor</h1>
+  <h1 id="title">GEO<span class="dot">.</span>Monitor</h1>
   <div class="meta" id="meta"></div>
 </div></header>
 
@@ -238,9 +275,11 @@ footer{margin-top:40px;font-size:12px;color:var(--muted);border-top:1px solid va
 <table class="matrix" id="articles"></table>
 </section>
 
+<section id="trendSec"__TREND_HIDDEN__>
 <h2>Share of voice over time</h2>
 <div class="sub" id="trendSub">Overall visibility of each domain by run date (all niches and engines).</div>
 <div class="card"><canvas id="trendChart"></canvas></div>
+</section>
 
 <div class="grid2">
   <div>
@@ -266,18 +305,33 @@ const D = __DATA__;
    through String() unchanged. */
 const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
+/* White-label chrome: brand, subject and accent come from the data blob
+   (REPORT_BRAND / REPORT_ACCENT or explicit arguments). Brand and subject
+   are untrusted strings: they reach markup only through esc(), and the
+   title / subtitle / footer only through textContent / document.title.
+   The accent is a validated #RRGGBB, safe to set as a CSS variable. */
+document.documentElement.style.setProperty('--accent', D.accent);
+document.documentElement.style.setProperty('--accent-soft', D.accent_soft);
+const h1 = document.getElementById('title');
+if (D.brand && D.brand.includes('.')) {
+  const i = D.brand.lastIndexOf('.');
+  h1.innerHTML = esc(D.brand.slice(0, i)) + '<span class="dot">.</span>' +
+    esc(D.brand.slice(i + 1)) + '&ensp;GEO Monitor';
+} else if (D.brand) {
+  h1.innerHTML = esc(D.brand) + '&ensp;GEO Monitor';
+} else {
+  h1.innerHTML = 'GEO<span class="dot">.</span>Monitor';
+}
+document.title = (D.subject ? D.subject + ' · ' : '') + 'GEO Monitor' +
+  (D.brand ? ' · ' + D.brand : '');
+
 document.getElementById('meta').textContent =
+  (D.subject ? D.subject + ' · ' : '') +
   `period ${D.dates[0]} — ${D.latest} · generated ${D.generated}`;
 if (D.notice) {
   const n = document.getElementById('notice');
   n.textContent = D.notice;
   n.hidden = false;
-}
-
-/* Trend caption: warn about hidden partial dates */
-if (D.trend_hidden > 0) {
-  document.getElementById('trendSub').textContent +=
-    ` Dates with partial coverage (gap-fills) are not shown: ${D.trend_hidden} of ${D.dates.length}.`;
 }
 
 /* KPI */
@@ -292,7 +346,7 @@ document.getElementById('kpis').innerHTML = [
 
 /* Niche × domain matrix */
 const shade = p => p === 0 ? 'transparent'
-  : `rgba(255,92,31,${(0.12 + 0.78 * p / 100).toFixed(2)})`;
+  : `rgba(${D.accent_rgb.join(',')},${(0.12 + 0.78 * p / 100).toFixed(2)})`;
 const fg = p => p > 55 ? '#fff' : 'var(--ink)';
 let html = '<tr><th></th>' +
   D.domains.map(d => `<th class="dom">${esc(d)}</th>`).join('') + '</tr>';
@@ -354,23 +408,33 @@ if (D.articles.length) {
     ).join('');
 }
 
-/* Trend */
-new Chart(document.getElementById('trendChart'), {
-  type: 'line',
-  data: {
-    labels: D.dates,
-    datasets: D.domains.map(d => ({
-      label: d, data: D.trend[d], borderColor: D.colors[d],
-      backgroundColor: D.colors[d], tension: .3, spanGaps: true,
-      pointRadius: 3, borderWidth: 2,
-    })),
-  },
-  options: {
-    responsive: true,
-    scales: { y: { beginAtZero: true, ticks: { callback: v => v + '%' } } },
-    plugins: { legend: { labels: { usePointStyle: true, boxWidth: 8 } } },
-  },
-});
+/* Trend: a single date is a point, not a trend — the section stays hidden
+   (the server already marks it hidden for single-date exports). */
+if (D.dates.length < 2) {
+  document.getElementById('trendSec').hidden = true;
+} else {
+  /* Trend caption: warn about hidden partial dates */
+  if (D.trend_hidden > 0) {
+    document.getElementById('trendSub').textContent +=
+      ` Dates with partial coverage (gap-fills) are not shown: ${D.trend_hidden} of ${D.dates.length}.`;
+  }
+  new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: {
+      labels: D.dates,
+      datasets: D.domains.map(d => ({
+        label: d, data: D.trend[d], borderColor: D.colors[d],
+        backgroundColor: D.colors[d], tension: .3, spanGaps: true,
+        pointRadius: 3, borderWidth: 2,
+      })),
+    },
+    options: {
+      responsive: true,
+      scales: { y: { beginAtZero: true, ticks: { callback: v => v + '%' } } },
+      plugins: { legend: { labels: { usePointStyle: true, boxWidth: 8 } } },
+    },
+  });
+}
 
 /* By engine */
 new Chart(document.getElementById('engineChart'), {
@@ -398,8 +462,10 @@ document.getElementById('hits').innerHTML = D.current_hits.length
   : '<li>No domains found in answers in the current snapshot.</li>';
 
 document.getElementById('foot').textContent =
-  `Pairs in current snapshot: ${D.n_pairs}. API errors across all history: ${D.n_errors}. ` +
+  `${D.brand || 'GEO Tracker'} · Pairs in current snapshot: ${D.n_pairs}. ` +
+  `API errors across all history: ${D.n_errors}. ` +
   (D.audit_meta.models.length ? `Models (latest run): ${D.audit_meta.models.join(', ')}. ` : '') +
+  `Measured via official search APIs, not consumer chat apps. ` +
   `Data source: results.csv · geo_tracker.py`;
 </script>
 </body>
@@ -408,14 +474,32 @@ document.getElementById('foot').textContent =
 
 
 def build_dashboard(rows: list, domains: list, niches: dict, out_path: Path,
-                    articles: dict = None, notice: str = None) -> None:
+                    articles: dict = None, notice: str = None, *,
+                    report_brand: str = None, report_subject: str = None,
+                    accent_color: str = None) -> None:
     """notice: a banner shown above every figure — the service passes it for a
-    run that was cancelled or interrupted."""
+    run that was cancelled or interrupted.
+
+    report_brand / accent_color: white-label publisher and accent; None falls
+    back to REPORT_BRAND / REPORT_ACCENT (see resolve_branding). report_subject
+    names what is audited (the service passes the brand's name); it prefixes
+    the subtitle and the page title."""
     data = _prepare(rows, domains, niches, articles)
     data["notice"] = notice or ""
+    brand, accent = resolve_branding(report_brand, accent_color)
+    rgb = [int(accent[i:i + 2], 16) for i in (1, 3, 5)]
+    data["brand"] = brand
+    data["subject"] = (report_subject or "").strip()
+    data["accent"] = accent
+    data["accent_rgb"] = rgb
+    data["accent_soft"] = blend_with_white(accent, 0.10)
+    if accent != DEFAULT_ACCENT and domains:
+        data["colors"][domains[0]] = accent  # only the first domain color
     # "</" inside the inline JSON (a query or title containing "</script>")
     # would close the <script> tag early and dump the rest as markup. "<\/"
     # is the same string to the JS/JSON parser but invisible to the HTML one.
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    html = TEMPLATE.replace("__DATA__", payload)
+    html = TEMPLATE.replace("__TREND_HIDDEN__",
+                            " hidden" if len(data["dates"]) < 2 else "")
+    html = html.replace("__DATA__", payload)
     Path(out_path).write_text(html, encoding="utf-8")

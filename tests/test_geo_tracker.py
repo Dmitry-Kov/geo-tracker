@@ -9,10 +9,14 @@ no network, no quota spent.
 import argparse
 import csv
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
 import geo_tracker as gt
+
+ROOT = Path(__file__).resolve().parents[1]
 
 ANSWER = {"text": "example.com is great", "urls": ["https://example.com/a"],
           "titles": ["example.com"], "model": "gem-test",
@@ -749,3 +753,261 @@ def test_build_docx_explicit_config(paths):
     tables = "\n".join(c.text for t in docx.Document(out).tables for r in t.rows for c in r.cells)
     assert "brand.io" in text + tables
     assert "example.com" not in text + tables  # no leaked global config
+
+
+# ---------------------------------------------------------------------------
+# White-label reports: no hardcoded publisher, REPORT_BRAND / REPORT_ACCENT
+# ---------------------------------------------------------------------------
+
+def dashboard_blob(html):
+    """The inline JSON data blob of a generated dashboard."""
+    start = html.index("const D = ") + len("const D = ")
+    end = html.index(";\n", start)
+    return json.loads(html[start:end])
+
+
+def test_report_sources_and_env_example_have_no_publisher_branding():
+    for name in ("report_html.py", "report_docx.py", "geo_tracker.py"):
+        assert "Optimize.uz" not in (ROOT / name).read_text(encoding="utf-8"), name
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "# REPORT_BRAND=" in example
+    assert "# REPORT_ACCENT=#FF5C1F" in example
+
+
+def test_resolve_branding(monkeypatch):
+    from report_html import resolve_branding, DEFAULT_ACCENT
+    monkeypatch.delenv("REPORT_BRAND", raising=False)
+    monkeypatch.delenv("REPORT_ACCENT", raising=False)
+    assert resolve_branding() == ("", DEFAULT_ACCENT)
+
+    monkeypatch.setenv("REPORT_BRAND", "  Env Agency  ")
+    monkeypatch.setenv("REPORT_ACCENT", "#2b6cb0")
+    assert resolve_branding() == ("Env Agency", "#2b6cb0")   # stripped, env fallback
+    assert resolve_branding("Explicit", "#111111") == ("Explicit", "#111111")
+    # an explicit empty string is a decision, not a fallback to the env
+    assert resolve_branding("", "") == ("", DEFAULT_ACCENT)
+
+    for bad in ("", "red", "#FFF", "#12345", "#1234567", "#GGHHII",
+                "url(evil)", "#2B6CB0;}body{background:red"):
+        assert resolve_branding(None, bad)[1] == DEFAULT_ACCENT, bad
+    monkeypatch.setenv("REPORT_ACCENT", "red;}body{background:url(evil)")
+    assert resolve_branding()[1] == DEFAULT_ACCENT           # malformed env too
+
+
+def test_default_reports_are_white_label_neutral(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    from report_html import build_dashboard
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_history(paths)
+
+    out = paths / "default.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    assert "Optimize.uz" not in html
+    assert "<title>GEO Monitor</title>" in html              # neutral static fallback
+    assert '<h1 id="title">GEO<span class="dot">.</span>Monitor</h1>' in html
+    assert "Measured via official search APIs, not consumer chat apps." in html
+    assert "D.brand || 'GEO Tracker'" in html                # neutral footer
+    data = dashboard_blob(html)
+    assert data["brand"] == "" and data["subject"] == ""
+    assert data["accent"] == "#FF5C1F" and data["accent_rgb"] == [255, 92, 31]
+
+    for lang, header, footer in (
+            ("en", "GEO.Monitor",
+             "GEO Tracker · Official search APIs only (not consumer chat apps)"),
+            ("ru", "GEO.Монитор",
+             "GEO-трекер · Только официальные поисковые API "
+             "(не потребительские чат-приложения)")):
+        d = paths / f"default_{lang}.docx"
+        report_docx.build_docx(d, lang=lang)
+        doc = docx.Document(d)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Optimize.uz" not in text
+        assert doc.paragraphs[0].text == header
+        assert footer in text
+
+
+def test_dashboard_branding_from_env_and_explicit_override(paths, monkeypatch):
+    from report_html import build_dashboard, blend_with_white
+    seed_history(paths)
+    monkeypatch.setenv("REPORT_BRAND", "  Acme SEO  ")
+    monkeypatch.setenv("REPORT_ACCENT", "#2B6CB0")
+    out = paths / "env.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    data = dashboard_blob(html)
+    assert data["brand"] == "Acme SEO"
+    assert data["accent"] == "#2B6CB0" and data["accent_rgb"] == [43, 108, 176]
+    assert data["accent_soft"] == blend_with_white("#2B6CB0", 0.10)
+    assert data["colors"][gt.DOMAINS[0]] == "#2B6CB0"        # only index 0 replaced
+    assert data["colors"][gt.DOMAINS[1]] == "#1F7A8C"
+    assert "setProperty('--accent', D.accent)" in html
+    assert "D.accent_rgb.join(',')" in html                  # shade() uses the accent
+    # subject prefixes the page title and the subtitle, both as text
+    assert html.count("(D.subject ? D.subject + ' · ' : '')") == 2
+
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out,
+                    report_brand="agency.io", report_subject="Audit Subject",
+                    accent_color="#111111")                  # explicit args win
+    data = dashboard_blob(out.read_text(encoding="utf-8"))
+    assert data["brand"] == "agency.io" and data["subject"] == "Audit Subject"
+    assert data["accent"] == "#111111"
+    assert "agency.io" not in out.read_text(encoding="utf-8").split("const D = ")[0]
+
+
+def test_dashboard_hostile_brand_and_subject_stay_escaped(paths):
+    from report_html import build_dashboard
+    seed_history(paths)
+    brand = "<img src=x onerror=alert(1)>"
+    subject = "</script><script>alert(2)</script>"
+    out = paths / "hostile.html"
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out,
+                    report_brand=brand, report_subject=subject)
+    html = out.read_text(encoding="utf-8")
+    start = html.index("const D = ") + len("const D = ")
+    end = html.index(";\n", start)
+    blob = html[start:end]
+    assert "</" not in blob                                  # no early </script>
+    data = json.loads(blob)                                  # round-trips intact
+    assert data["brand"] == brand and data["subject"] == subject
+    markup = html[:start] + html[end:]
+    assert "<img src=x" not in markup                        # never raw markup
+    assert "<script>alert(2)" not in markup
+    assert html.count("</script>") == 2
+    assert "esc(D.brand)" in html                            # no-dot branch escapes
+    assert "esc(D.brand.slice(0, i))" in html                # dot branch escapes
+
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out,
+                    report_brand="<b>x</b>.io")              # hostile dot-brand
+    html = out.read_text(encoding="utf-8")
+    start = html.index("const D = ") + len("const D = ")
+    end = html.index(";\n", start)
+    assert "<b>x</b>" not in html[:start] + html[end:]
+    assert json.loads(html[start:end])["brand"] == "<b>x</b>.io"
+
+
+def test_invalid_accent_never_reaches_css_or_docx(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    from report_html import build_dashboard, DEFAULT_ACCENT
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_history(paths)
+    hostile = "#FF5C1F;}body{background:url(evil)"
+    out, d = paths / "bad.html", paths / "bad.docx"
+    for bad in ("", "red", "#12345", "#1234567", "#GGHHII", hostile):
+        monkeypatch.setenv("REPORT_ACCENT", bad)
+        build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out)
+        data = dashboard_blob(out.read_text(encoding="utf-8"))
+        assert data["accent"] == DEFAULT_ACCENT, bad
+        assert data["accent_rgb"] == [255, 92, 31], bad
+        report_docx.build_docx(d)                            # must not raise RGBColor
+        assert "FF5C1F" in docx.Document(d).element.xml, bad
+    assert "url(evil)" not in out.read_text(encoding="utf-8")
+    monkeypatch.delenv("REPORT_ACCENT")
+    build_dashboard(gt.load_results(), gt.DOMAINS, gt.NICHES, out,
+                    accent_color=hostile)                    # explicit invalid too
+    assert dashboard_blob(out.read_text(encoding="utf-8"))["accent"] == DEFAULT_ACCENT
+
+
+def test_dashboard_trend_hidden_for_single_date_visible_for_many(paths):
+    from report_html import build_dashboard
+    seed_history(paths)
+    rows = gt.load_results()
+    out = paths / "single.html"
+    build_dashboard(rows, gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    assert '<section id="trendSec" hidden>' in html          # 1 date: no 1-dot chart
+    assert "D.dates.length < 2" in html                      # JS guards it as well
+
+    earlier = [dict(r, run_date="2026-11-16", run_ts="2026-11-16T10:00:00Z")
+               for r in rows]
+    out = paths / "multi.html"
+    build_dashboard(earlier + rows, gt.DOMAINS, gt.NICHES, out)
+    html = out.read_text(encoding="utf-8")
+    assert '<section id="trendSec">' in html                 # multi-date: drawn as before
+    assert len(dashboard_blob(html)["dates"]) == 2
+
+
+def test_build_docx_white_label_explicit(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    from report_html import blend_with_white
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_history(paths)
+    # one query cited only by test.org (25% → mid fill), one by nobody
+    gt.append_row(gt.make_row("gemini", "n1", "q3",
+                              answer={"text": "t", "urls": ["https://test.org/x"],
+                                      "titles": ["test.org"], "model": "m"}))
+    gt.append_row(gt.make_row("gemini", "n1", "q4",
+                              answer={"text": "t", "urls": [], "titles": [],
+                                      "model": "m"}))
+    accent = "#2B6CB0"
+    mid = blend_with_white(accent, 0.35)[1:]
+    soft = blend_with_white(accent, 0.10)[1:]
+    for i, (brand, header) in enumerate((("agency.io", "agency.io  GEO Monitor"),
+                                         ("Acme SEO", "Acme SEO  GEO Monitor"))):
+        out = paths / f"wl_{i}.docx"
+        report_docx.build_docx(out, report_brand=brand,
+                               report_subject="Audit Subject", accent_color=accent)
+        doc = docx.Document(out)
+        assert doc.paragraphs[0].text == header
+        assert doc.paragraphs[1].text.startswith("Audit Subject · ")
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert f"{brand} · Official search APIs only (not consumer chat apps)" in text
+        xml = doc.element.xml
+        assert "2B6CB0" in xml and mid in xml and soft in xml
+        assert "FF5C1F" not in xml                           # no hardcoded orange left
+        if "." in brand:                                     # the dot wears the accent
+            dot = doc.paragraphs[0].runs[1]
+            assert dot.text == "."
+            assert dot.font.color.rgb == docx.shared.RGBColor.from_string("2B6CB0")
+
+
+def test_build_docx_branding_from_env(paths, monkeypatch):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    seed_history(paths)
+    monkeypatch.setenv("REPORT_BRAND", "Acme SEO")
+    monkeypatch.setenv("REPORT_ACCENT", "#2B6CB0")
+    out = paths / "env.docx"
+    report_docx.build_docx(out)
+    doc = docx.Document(out)
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert doc.paragraphs[0].text == "Acme SEO  GEO Monitor"
+    assert "Acme SEO · Official search APIs only (not consumer chat apps)" in text
+    assert "2B6CB0" in doc.element.xml and "FF5C1F" not in doc.element.xml
+
+
+def test_report_cli_brand_and_accent_flags(paths, monkeypatch, capsys):
+    docx = pytest.importorskip("docx")
+    import report_docx
+    seed_history(paths)
+    gt.cmd_report(argparse.Namespace(out=None, brand="Acme SEO", accent="#2B6CB0"))
+    capsys.readouterr()
+    data = dashboard_blob(gt.DASHBOARD_HTML.read_text(encoding="utf-8"))
+    assert data["brand"] == "Acme SEO" and data["accent"] == "#2B6CB0"
+
+    monkeypatch.setattr(report_docx, "RESULTS_CSV", gt.RESULTS_CSV)
+    out = paths / "cli.docx"
+    monkeypatch.setattr(sys, "argv", ["report_docx.py", "--out", str(out),
+                                      "--brand", "agency.io", "--accent", "#2B6CB0"])
+    report_docx.main()
+    capsys.readouterr()
+    doc = docx.Document(out)
+    assert doc.paragraphs[0].text == "agency.io  GEO Monitor"
+    assert "2B6CB0" in doc.element.xml
+
+
+def test_report_help_documents_brand_flags_without_publisher(monkeypatch, capsys):
+    import report_docx
+    for argv, entry in ((["geo_tracker.py", "report", "--help"], gt.main),
+                        (["report_docx.py", "--help"], report_docx.main)):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as e:
+            entry()
+        assert e.value.code == 0
+        help_text = capsys.readouterr().out
+        assert "--brand" in help_text and "--accent" in help_text
+        assert "Optimize" not in help_text

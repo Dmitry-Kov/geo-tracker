@@ -65,7 +65,11 @@ detection to fight.
   on daily-quota exhaustion instead of burning retries, `--resume` finishes
   the run later without duplicates
 - Reports: console summary, self-contained HTML dashboard (Chart.js),
-  DOCX export
+  DOCX export — white-label: `REPORT_BRAND` (publisher/agency name) and
+  `REPORT_ACCENT` (`#RRGGBB`, default `#FF5C1F`) in `.env`, or `--brand` /
+  `--accent` on the report commands; unset, reports render neutral
+  "GEO Monitor" chrome and carry the caveat that measurement is via
+  official search APIs, not the consumer chat apps
 
 ## Quick Start
 
@@ -269,7 +273,7 @@ server-suggested retry; finish the remainder later with `--resume`.
 ### `report` — summary and dashboard
 
 ```bash
-python geo_tracker.py report [--out PATH]
+python geo_tracker.py report [--out PATH] [--brand NAME] [--accent #RRGGBB]
 ```
 
 Prints the share-of-voice matrix and domain leaderboard for the latest run,
@@ -298,12 +302,22 @@ sources.
 ### DOCX export
 
 ```bash
-python report_docx.py [--out PATH]   # requires python-docx
+python report_docx.py [--out PATH] [--lang en|ru] [--brand NAME] [--accent #RRGGBB]   # requires python-docx
 ```
 
 Builds a formatted DOCX report from the latest run: KPI row, visibility
 matrix, measurement uncertainty (95% CI + methodology + provenance), article
 citations (when `ARTICLES` is set), engine comparison, auto-derived findings.
+
+**White-label branding.** `--brand` / `--accent` (both report commands) or
+`REPORT_BRAND` / `REPORT_ACCENT` in `.env` set the publisher name and the
+accent color of the HTML and DOCX reports. A brand containing a dot is
+rendered with the dot in the accent color (`agency.io` → agency**.**io);
+any other name is shown as-is. Without a brand the reports stay neutral
+("GEO Monitor", footer "GEO Tracker" / "GEO-трекер"). An invalid accent
+falls back to `#FF5C1F`. Service exports additionally carry the audited
+brand's name as the report subject; the publisher branding still comes
+from `REPORT_BRAND` / `REPORT_ACCENT`.
 
 ### Scheduled runs
 

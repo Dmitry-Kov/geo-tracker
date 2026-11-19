@@ -745,6 +745,7 @@ def share_of_voice(rows: list, *, run_date: str = None, engine: str = None,
 
 
 def cmd_report(args) -> None:
+    load_env()  # REPORT_BRAND / REPORT_ACCENT may live in .env
     rows = load_results()
     if not rows:
         sys.exit("results.csv is empty — run first: python geo_tracker.py run")
@@ -907,7 +908,9 @@ def cmd_report(args) -> None:
                 print(f"      {r['engine']:<10} {r['niche']:<14} {r['query']}")
 
     out = Path(args.out) if args.out else DASHBOARD_HTML
-    build_dashboard(rows, DOMAINS, NICHES, out, articles=ARTICLES)
+    build_dashboard(rows, DOMAINS, NICHES, out, articles=ARTICLES,
+                    report_brand=getattr(args, "brand", None),
+                    accent_color=getattr(args, "accent", None))
     print(f"\nDashboard: {out}")
 
 
@@ -1001,6 +1004,10 @@ def main() -> None:
 
     p_rep = sub.add_parser("report", help="summary + HTML dashboard")
     p_rep.add_argument("--out", help="path for dashboard.html")
+    p_rep.add_argument("--brand", help="publisher/agency name on the dashboard "
+                       "(default: REPORT_BRAND from .env, else neutral GEO Monitor)")
+    p_rep.add_argument("--accent", help="dashboard accent color #RRGGBB "
+                       "(default: REPORT_ACCENT from .env, else #FF5C1F)")
     p_rep.set_defaults(fn=cmd_report)
 
     p_me = sub.add_parser("manual-export", help="CSV checklist for a manual run")

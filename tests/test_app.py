@@ -54,7 +54,8 @@ def env(monkeypatch):
     for e in gt.ENGINES:
         monkeypatch.setenv(gt.ENGINES[e]["env"], "test-key")
         monkeypatch.setitem(gt.ENGINES[e], "fn", fake_answer)
-    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY"):
+    for var in ("APP_PASSWORD", "APP_ALLOWED_HOSTS", "APP_SECRET", "APP_HTTPS_ONLY",
+                "REPORT_BRAND", "REPORT_ACCENT"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(gt, "load_env", lambda: None)
     monkeypatch.setattr(runner, "SLEEP_SEC", 0)
@@ -120,6 +121,70 @@ def test_full_flow_brand_run_reports(client):
     text = "\n".join(p.text for p in docx.Document(io.BytesIO(r.content)).paragraphs)
     assert "brand.io" in text and "Неопределённость измерения" in text
     assert "example.com" not in text
+
+
+# ---------------------------------------------------------------------------
+# White-label exports: the audited brand as subject, publisher branding from
+# REPORT_BRAND / REPORT_ACCENT, no hardcoded publisher anywhere
+# ---------------------------------------------------------------------------
+
+def dashboard_data(html):
+    start = html.index("const D = ") + len("const D = ")
+    return json.loads(html[start:html.index(";\n", start)])
+
+
+def test_exports_carry_brand_subject_and_env_branding(client, env):
+    docx = pytest.importorskip("docx")
+    brand_id = create_brand(client)
+    r = client.post(f"/brands/{brand_id}/run", follow_redirects=False)
+    run_id = int(r.headers["location"].rsplit("/", 1)[-1])
+
+    html = client.get(f"/runs/{run_id}/report.html").text
+    assert "Optimize.uz" not in html
+    assert "Measured via official search APIs, not consumer chat apps." in html
+    assert '<section id="trendSec" hidden>' in html          # single run: no trend
+    data = dashboard_data(html)
+    assert data["subject"] == "TestBrand"                    # the audited brand
+    assert data["brand"] == "" and data["accent"] == "#FF5C1F"
+
+    for lang, footer in (
+            ("en", "GEO Tracker · Official search APIs only (not consumer chat apps)"),
+            ("ru", "GEO-трекер · Только официальные поисковые API "
+                   "(не потребительские чат-приложения)")):
+        r = client.get(f"/runs/{run_id}/report.docx?lang={lang}")
+        assert r.status_code == 200
+        doc = docx.Document(io.BytesIO(r.content))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Optimize.uz" not in text
+        assert "TestBrand · " in text                        # subject prefixes subtitle
+        assert footer in text
+
+    # publisher branding comes from the environment at export time
+    env.setenv("REPORT_BRAND", "agency.io")
+    env.setenv("REPORT_ACCENT", "#2B6CB0")
+    html = client.get(f"/runs/{run_id}/report.html").text
+    data = dashboard_data(html)
+    assert data["brand"] == "agency.io" and data["subject"] == "TestBrand"
+    assert data["accent"] == "#2B6CB0" and data["accent_rgb"] == [43, 108, 176]
+    assert data["colors"]["brand.io"] == "#2B6CB0"           # first domain color only
+    assert "agency.io" not in html.split("const D = ")[0]    # never raw markup
+
+    r = client.get(f"/runs/{run_id}/report.docx?lang=en")
+    doc = docx.Document(io.BytesIO(r.content))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert doc.paragraphs[0].text == "agency.io  GEO Monitor"
+    assert "TestBrand · " in text
+    assert "agency.io · Official search APIs only (not consumer chat apps)" in text
+    assert "2B6CB0" in doc.element.xml and "FF5C1F" not in doc.element.xml
+
+
+def test_report_branding_env_does_not_leak_between_tests(client):
+    # the previous test set REPORT_BRAND / REPORT_ACCENT; defaults must be back
+    brand_id = create_brand(client)
+    client.post(f"/brands/{brand_id}/run")
+    data = dashboard_data(client.get("/runs/1/report.html").text)
+    assert data["brand"] == "" and data["accent"] == "#FF5C1F"
+    assert data["subject"] == "TestBrand"
 
 
 def test_progress_endpoint(client):

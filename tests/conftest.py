@@ -10,6 +10,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -31,3 +33,12 @@ sys.modules["queries"] = queries
 import geo_tracker  # noqa: E402 — after the fake `queries` is installed
 
 geo_tracker.load_env = lambda: None
+
+
+@pytest.fixture(autouse=True)
+def _clean_report_branding(monkeypatch):
+    """White-label settings must not leak between tests (or in from the
+    shell): default-branding assertions need the real defaults. Tests that
+    exercise REPORT_BRAND / REPORT_ACCENT set them with their own monkeypatch."""
+    monkeypatch.delenv("REPORT_BRAND", raising=False)
+    monkeypatch.delenv("REPORT_ACCENT", raising=False)
