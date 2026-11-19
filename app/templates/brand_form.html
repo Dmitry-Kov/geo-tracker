@@ -64,6 +64,35 @@
 </form>
 </div>
 
+{% if brand %}
+<h2>Client share link</h2>
+<div class="card">
+  {% if brand.share_token %}
+  <p class="small muted">Read-only access to this brand's history, run reports and exports —
+  no login required, internal costs hidden. Anyone with this exact link can view it;
+  rotate to invalidate the old link, revoke to disable sharing.</p>
+  <div class="row-actions">
+    <input class="mono" readonly value="{{ request.url_for('share_brand', token=brand.share_token) }}"
+           onclick="this.select()" style="flex:1; min-width:20em">
+    <a class="btn small" href="/share/{{ brand.share_token }}" target="_blank">Open</a>
+    <form method="post" action="/brands/{{ brand.id }}/share" class="inline">
+      <button class="btn small" type="submit">Rotate</button>
+    </form>
+    <form method="post" action="/brands/{{ brand.id }}/share/revoke" class="inline"
+          onsubmit="return confirm('Revoke the share link? The current link stops working immediately.')">
+      <button class="btn small danger" type="submit">Revoke</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="small muted">Create a read-only link for this brand's history, run reports, and
+  exports — no login required, internal costs hidden.</p>
+  <form method="post" action="/brands/{{ brand.id }}/share" class="inline">
+    <button class="btn primary" type="submit">Enable share link</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if brand and runs %}
 <h2>Runs</h2>
 <div class="card">
@@ -83,68 +112,7 @@
 </div>
 {% endif %}
 
-{% if brand and history_json %}
-<h2>History — done runs, grounded channel</h2>
-<p class="small muted">Share of voice per niche × domain over completed runs, each read from
-its own config snapshot. 95% CI via the audit estimator (in the table). Cancelled, error and
-queued runs contribute no figures. A dashed grey segment and a note in the table mark a run that
-is <strong>not comparable with the one before it</strong> — the matching rules, the geo or the
-domain's aliases changed, so the step is a change of measurement, not of visibility.</p>
-{% for niche, ndata in history_json.items() %}
-<div class="card">
-  <h3>{{ ndata.title }}</h3>
-  <canvas id="chart-{{ niche }}" height="90"></canvas>
-  <table class="small">
-    <tr><th>Domain</th><th>Run</th><th>Share</th><th>95% CI</th><th>nq</th><th>n</th><th>method</th><th>vs previous run</th></tr>
-    {% for d, s in ndata.domains.items() %}
-      {% for i in range(s.labels|length) %}
-      <tr>
-        <td class="mono">{{ d }}</td>
-        <td class="mono small">{{ s.labels[i] }}</td>
-        <td class="mono">{{ s.point[i] }}%</td>
-        <td class="mono small">[{{ s.lo[i] }}–{{ s.hi[i] }}]</td>
-        <td class="mono">{{ s.nq[i] }}</td>
-        <td class="mono">{{ s.n[i] }}</td>
-        <td class="mono small">{{ s.method[i] }}</td>
-        <td class="small">{% if s.breaks[i] %}<span class="badge insuff">not comparable</span> {{ s.breaks[i] }}{% endif %}</td>
-      </tr>
-      {% endfor %}
-    {% endfor %}
-  </table>
-</div>
-{% endfor %}
-<script src="/static/chart.umd.min.js"></script>
-<script>
-const HISTORY = {{ history_json|tojson }};
-const PALETTE = ['#FF5C1F','#2563eb','#16a34a','#9333ea','#d97706','#0891b2'];
-for (const [niche, ndata] of Object.entries(HISTORY)) {
-  const el = document.getElementById('chart-' + niche);
-  if (!el || typeof Chart === 'undefined') continue;
-  const series = Object.entries(ndata.domains);
-  const runIds = [...new Set(series.flatMap(([, s]) => s.run_ids))].sort((a, b) => a - b);
-  const labels = runIds.map(id => {
-    for (const [, s] of series) { const k = s.run_ids.indexOf(id); if (k >= 0) return s.labels[k]; }
-    return '#' + id;
-  });
-  let ci = 0;
-  const datasets = series.map(([d, s]) => {
-    const color = PALETTE[ci++ % PALETTE.length];
-    // breaks[i]: the point at runIds[i] is not comparable with the one before it
-    const breaks = runIds.map(id => { const k = s.run_ids.indexOf(id); return k >= 0 && !!s.breaks[k]; });
-    return {label: d, borderColor: color, backgroundColor: color, tension: 0.1, spanGaps: true,
-            segment: {borderDash: c => breaks[c.p1DataIndex] ? [5, 5] : undefined,
-                      borderColor: c => breaks[c.p1DataIndex] ? '#9ca3af' : undefined},
-            pointStyle: breaks.map(b => b ? 'rectRot' : 'circle'),
-            pointRadius: breaks.map(b => b ? 6 : 3),
-            data: runIds.map(id => { const k = s.run_ids.indexOf(id); return k >= 0 ? s.point[k] : null; })};
-  });
-  new Chart(el, {type: 'line', data: {labels, datasets},
-    options: {responsive: true,
-      scales: {y: {min: 0, max: 100, title: {display: true, text: 'share %'}}},
-      plugins: {legend: {position: 'bottom'}, tooltip: {mode: 'index', intersect: false}}}});
-}
-</script>
-{% endif %}
+{% if brand and history_json %}{% include "_history.html" %}{% endif %}
 
 {% if brand and done_list|length >= 2 %}
 <h2>Compare two runs</h2>

@@ -40,6 +40,11 @@ class Brand(Base):
     samples: Mapped[int] = mapped_column(Integer, default=1)
     schedule: Mapped[str] = mapped_column(String(100), default="")  # cron; "" = manual
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Read-only client share link: the token IS the access key to /share/{token}
+    # (no login). NULL = sharing disabled; UNIQUE so one token never opens two
+    # brands. Rotating replaces it, revoking sets it back to NULL.
+    share_token: Mapped[str] = mapped_column(String(64), nullable=True,
+                                             unique=True, default=None)
     runs: Mapped[list["Run"]] = relationship(
         back_populates="brand", cascade="all, delete-orphan",
         order_by="Run.id.desc()")
@@ -200,8 +205,22 @@ def migrate_database(engine) -> None:
     # Alembic runs on this engine's own connection (see migrations/env.py)
     # rather than on a URL rebuilt from text: no second engine, and no path
     # that has to survive being written out and parsed back.
-    with engine.begin() as conn:
-        cfg.attributes["connection"] = conn
-        if tables and "alembic_version" not in tables:
-            command.stamp(cfg, BASELINE_REVISION)
-        command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        # Batch migrations recreate tables (create copy, drop original,
+        # rename). With foreign_keys=ON the DROP of a parent table that
+        # other rows reference fails, so enforcement is off for the
+        # migration — the copy moves every row, nothing is orphaned. The
+        # pragma is connection-local and a no-op inside a transaction, so
+        # it is set BEFORE the migration transaction and restored after;
+        # every other pooled connection keeps its own foreign_keys=ON.
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        conn.commit()
+        try:
+            with conn.begin():
+                cfg.attributes["connection"] = conn
+                if tables and "alembic_version" not in tables:
+                    command.stamp(cfg, BASELINE_REVISION)
+                command.upgrade(cfg, "head")
+        finally:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            conn.commit()

@@ -26,7 +26,7 @@ from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 import geo_tracker as gt
-from report_html import build_dashboard
+from report_html import build_dashboard, resolve_branding
 from report_docx import build_docx
 from sov_stats import (sov_stats, unowned_cited_sources, DEFAULT_B, DEFAULT_SEED,
                        MIN_BOOTSTRAP_QUERIES)
@@ -44,6 +44,12 @@ TEMPLATES = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+# On EVERY /share/... response: the token in the URL must not leak through
+# the Referer header when a client clicks an external source link, and
+# search engines must not index client links.
+SHARE_HEADERS = {"Referrer-Policy": "no-referrer",
+                 "X-Robots-Tag": "noindex, nofollow"}
 
 
 def env_flag(name: str) -> bool:
@@ -312,7 +318,12 @@ def create_app(db_path=None) -> FastAPI:
                                       request.url.path)
         if refused:
             return PlainTextResponse(refused[1], status_code=refused[0])
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/share/"):
+            # every shared response, error pages included
+            for k, v in SHARE_HEADERS.items():
+                response.headers[k] = v
+        return response
 
     app.add_middleware(
         SessionMiddleware,
@@ -337,6 +348,10 @@ def create_app(db_path=None) -> FastAPI:
         base = {"request": request, "authed": bool(request.session.get("authed")),
                 "auth_enabled": bool(os.environ.get("APP_PASSWORD"))}
         base.update(ctx or {})
+        if base.get("share_mode"):
+            # white-label header: the publisher from REPORT_BRAND, else the
+            # neutral logo — never the admin chrome
+            base.setdefault("report_brand", resolve_branding()[0])
         return TEMPLATES.TemplateResponse(request, template, base,
                                           status_code=status, headers=headers)
 
@@ -454,34 +469,40 @@ def create_app(db_path=None) -> FastAPI:
             return render(request, "brand_form.html",
                           brand_form_context(s, b, form_values(brand=b)))
 
+    def compare_context(s, brand, a, b):
+        """The comparison page context, scoped to one brand: runs of any
+        other brand read as "not found in this brand". Shared by the admin
+        and the client-share comparison pages."""
+        done = sorted((r for r in brand.runs if r.status == "done"),
+                      key=lambda r: r.id)
+        done_list = [{"id": r.id, "label": _run_label(r)} for r in done]
+        ctx = {"brand": brand, "done_list": done_list, "a": a, "b": b,
+               "result": None, "error": ""}
+        if a is not None and b is not None:
+            ra, rb = s.get(Run, a), s.get(Run, b)
+            if (ra is None or rb is None or ra.brand_id != brand.id
+                    or rb.brand_id != brand.id):
+                ctx["error"] = "run not found in this brand"
+            elif ra.status != "done" or rb.status != "done":
+                ctx["error"] = "only done runs can be compared"
+            elif a == b:
+                ctx["error"] = "pick two different runs"
+            else:
+                cfg_a, rows_a = run_rows(ra)
+                cfg_b, rows_b = run_rows(rb)
+                ctx["result"] = dynamics.compare(
+                    cfg_a, rows_a, cfg_b, rows_b,
+                    status_a=ra.status, status_b=rb.status)
+                ctx["label_a"], ctx["label_b"] = _run_label(ra), _run_label(rb)
+        return ctx
+
     @app.get("/brands/{brand_id}/compare", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     def compare_page(request: Request, brand_id: int, a: int = None, b: int = None):
         with Session() as s:
             brand = s.get(Brand, brand_id)
             if brand is None:
                 raise HTTPException(404, "brand not found")
-            done = sorted((r for r in brand.runs if r.status == "done"),
-                          key=lambda r: r.id)
-            done_list = [{"id": r.id, "label": _run_label(r)} for r in done]
-            ctx = {"brand": brand, "done_list": done_list, "a": a, "b": b,
-                   "result": None, "error": ""}
-            if a is not None and b is not None:
-                ra, rb = s.get(Run, a), s.get(Run, b)
-                if (ra is None or rb is None or ra.brand_id != brand_id
-                        or rb.brand_id != brand_id):
-                    ctx["error"] = "run not found in this brand"
-                elif ra.status != "done" or rb.status != "done":
-                    ctx["error"] = "only done runs can be compared"
-                elif a == b:
-                    ctx["error"] = "pick two different runs"
-                else:
-                    cfg_a, rows_a = run_rows(ra)
-                    cfg_b, rows_b = run_rows(rb)
-                    ctx["result"] = dynamics.compare(
-                        cfg_a, rows_a, cfg_b, rows_b,
-                        status_a=ra.status, status_b=rb.status)
-                    ctx["label_a"], ctx["label_b"] = _run_label(ra), _run_label(rb)
-            return render(request, "comparison.html", ctx)
+            return render(request, "comparison.html", compare_context(s, brand, a, b))
 
     @app.post("/brands/{brand_id}", response_class=HTMLResponse, dependencies=[Depends(auth_guard)])
     async def brand_update(request: Request, brand_id: int):
@@ -528,6 +549,29 @@ def create_app(db_path=None) -> FastAPI:
             s.commit()
         sync_schedule(brand_id, "")
         return RedirectResponse("/", status_code=303)
+
+    # -- client share links (admin side) -------------------------------------
+    @app.post("/brands/{brand_id}/share", dependencies=[Depends(auth_guard)])
+    def share_enable(brand_id: int):
+        """Create or rotate the brand's read-only share token. The old link
+        stops working the moment a new token is committed."""
+        with Session() as s:
+            b = s.get(Brand, brand_id)
+            if b is None:
+                raise HTTPException(404, "brand not found")
+            b.share_token = secrets.token_urlsafe(24)  # 192 bits, URL-safe
+            s.commit()
+        return RedirectResponse(f"/brands/{brand_id}", status_code=303)
+
+    @app.post("/brands/{brand_id}/share/revoke", dependencies=[Depends(auth_guard)])
+    def share_revoke(brand_id: int):
+        with Session() as s:
+            b = s.get(Brand, brand_id)
+            if b is None:
+                raise HTTPException(404, "brand not found")
+            b.share_token = None
+            s.commit()
+        return RedirectResponse(f"/brands/{brand_id}", status_code=303)
 
     # -- runs ---------------------------------------------------------------
     @app.post("/brands/{brand_id}/run", dependencies=[Depends(auth_guard)])
@@ -630,23 +674,40 @@ def create_app(db_path=None) -> FastAPI:
             return TEMPLATES.TemplateResponse(request, "_receipt.html", {"a": a})
 
     # -- exports ------------------------------------------------------------
+    # One builder per format for the admin AND the client-share exports:
+    # same config snapshot, same incomplete_notice, same white-label subject.
+    def html_export(run):
+        b = run.brand
+        cfg, rows = run_rows(run)
+        fd, tmp = tempfile.mkstemp(suffix=".html")
+        os.close(fd)
+        # subject = the audited brand; publisher branding (REPORT_BRAND /
+        # REPORT_ACCENT) is resolved from the environment by the builder.
+        build_dashboard(rows, cfg["domains"], cfg["niches"], Path(tmp),
+                        articles=cfg["articles"], notice=incomplete_notice(run),
+                        report_subject=b.name)
+        tag = "" if run.status == "done" else f"_{run.status}"
+        return tmp, f"geo_dashboard_{b.name}_{run.id}{tag}.html"
+
+    def docx_export(run, lang):
+        b = run.brand
+        cfg, rows = run_rows(run)
+        fd, tmp = tempfile.mkstemp(suffix=".docx")
+        os.close(fd)
+        build_docx(Path(tmp), lang=lang, rows=rows, domains=cfg["domains"],
+                   niches=cfg["niches"], articles=cfg["articles"],
+                   notice=incomplete_notice(run, lang), report_subject=b.name)
+        tag = "" if run.status == "done" else f"_{run.status}"
+        return tmp, f"geo_report_{lang}_{b.name}_{run.id}{tag}.docx"
+
     @app.get("/runs/{run_id}/report.html", dependencies=[Depends(auth_guard)])
     def export_html(run_id: int):
         with Session() as s:
             run = s.get(Run, run_id)
             if run is None:
                 raise HTTPException(404, "run not found")
-            b = run.brand
-            cfg, rows = run_rows(run)
-            fd, tmp = tempfile.mkstemp(suffix=".html")
-            os.close(fd)
-            # subject = the audited brand; publisher branding (REPORT_BRAND /
-            # REPORT_ACCENT) is resolved from the environment by the builder.
-            build_dashboard(rows, cfg["domains"], cfg["niches"], Path(tmp),
-                            articles=cfg["articles"], notice=incomplete_notice(run),
-                            report_subject=b.name)
-            tag = "" if run.status == "done" else f"_{run.status}"
-        return FileResponse(tmp, filename=f"geo_dashboard_{b.name}_{run_id}{tag}.html",
+            tmp, name = html_export(run)
+        return FileResponse(tmp, filename=name,
                             background=BackgroundTask(os.unlink, tmp))
 
     @app.get("/runs/{run_id}/report.docx", dependencies=[Depends(auth_guard)])
@@ -657,15 +718,91 @@ def create_app(db_path=None) -> FastAPI:
             run = s.get(Run, run_id)
             if run is None:
                 raise HTTPException(404, "run not found")
-            b = run.brand
-            cfg, rows = run_rows(run)
-            fd, tmp = tempfile.mkstemp(suffix=".docx")
-            os.close(fd)
-            build_docx(Path(tmp), lang=lang, rows=rows, domains=cfg["domains"],
-                       niches=cfg["niches"], articles=cfg["articles"],
-                       notice=incomplete_notice(run, lang), report_subject=b.name)
-            tag = "" if run.status == "done" else f"_{run.status}"
-        return FileResponse(tmp, filename=f"geo_report_{lang}_{b.name}_{run_id}{tag}.docx",
+            tmp, name = docx_export(run, lang)
+        return FileResponse(tmp, filename=name,
+                            background=BackgroundTask(os.unlink, tmp))
+
+    # -- client share links (public, read-only) ------------------------------
+    # No auth_guard: possessing the brand's exact share_token IS the access.
+    # Every route is strictly scoped to that one brand; anything else reads
+    # as "not found". SHARE_HEADERS are attached by the request_guard
+    # middleware to every /share/... response.
+    def _shared_brand(s, token: str) -> Brand:
+        if not token:
+            raise HTTPException(404, "not found")
+        b = s.query(Brand).filter(Brand.share_token == token).first()
+        if b is None:
+            raise HTTPException(404, "not found")
+        return b
+
+    def _share_ctx(token: str, brand) -> dict:
+        return {"share_mode": True, "share_token": token,
+                "share_brand_name": brand.name, "share_home": f"/share/{token}"}
+
+    def _shared_run(s, brand, run_id: int) -> Run:
+        run = s.get(Run, run_id)
+        if run is None or run.brand_id != brand.id:
+            raise HTTPException(404, "not found")
+        return run
+
+    @app.get("/share/{token}", response_class=HTMLResponse, name="share_brand")
+    def share_brand(request: Request, token: str):
+        with Session() as s:
+            b = _shared_brand(s, token)
+            runs = list(b.runs)  # newest first (Run.id.desc)
+            done_runs = [r for r in runs if r.status == "done"]
+            history_json, done_list = _brand_history(b, runs, history_cache)
+            ctx = {"brand": b, "token": token, "done_runs": done_runs,
+                   "history_json": history_json, "done_list": done_list,
+                   **_share_ctx(token, b)}
+        return render(request, "share_brand.html", ctx, headers=SHARE_HEADERS)
+
+    @app.get("/share/{token}/compare", response_class=HTMLResponse)
+    def share_compare(request: Request, token: str, a: int = None, b: int = None):
+        with Session() as s:
+            brand = _shared_brand(s, token)
+            ctx = compare_context(s, brand, a, b)
+            ctx.update(_share_ctx(token, brand))
+        return render(request, "comparison.html", ctx, headers=SHARE_HEADERS)
+
+    @app.get("/share/{token}/runs/{run_id}", response_class=HTMLResponse)
+    def share_run(request: Request, token: str, run_id: int):
+        with Session() as s:
+            b = _shared_brand(s, token)
+            run = _shared_run(s, b, run_id)
+            ctx = run_context(s, run)
+            ctx.update(_share_ctx(token, b))
+        return render(request, "run.html", ctx, headers=SHARE_HEADERS)
+
+    @app.get("/share/{token}/answers/{answer_id}", response_class=HTMLResponse)
+    def share_answer(request: Request, token: str, answer_id: str):
+        with Session() as s:
+            b = _shared_brand(s, token)
+            a = s.get(Answer, answer_id)
+            if a is None or a.run.brand_id != b.id:
+                raise HTTPException(404, "not found")
+            return TEMPLATES.TemplateResponse(
+                request, "_receipt.html", {"a": a, "share_mode": True},
+                headers=SHARE_HEADERS)
+
+    @app.get("/share/{token}/runs/{run_id}/report.html")
+    def share_export_html(token: str, run_id: int):
+        with Session() as s:
+            b = _shared_brand(s, token)
+            run = _shared_run(s, b, run_id)
+            tmp, name = html_export(run)
+        return FileResponse(tmp, filename=name, headers=SHARE_HEADERS,
+                            background=BackgroundTask(os.unlink, tmp))
+
+    @app.get("/share/{token}/runs/{run_id}/report.docx")
+    def share_export_docx(token: str, run_id: int, lang: str = "en"):
+        if lang not in ("en", "ru"):
+            raise HTTPException(400, "lang must be en or ru")
+        with Session() as s:
+            b = _shared_brand(s, token)
+            run = _shared_run(s, b, run_id)
+            tmp, name = docx_export(run, lang)
+        return FileResponse(tmp, filename=name, headers=SHARE_HEADERS,
                             background=BackgroundTask(os.unlink, tmp))
 
     # -- settings -----------------------------------------------------------

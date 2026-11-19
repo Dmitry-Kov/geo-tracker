@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{{ share_brand_name }}{% endblock %}
+{% block content %}
+<div class="head-row">
+  <h1>{{ brand.name }}</h1>
+</div>
+<p class="mono small muted">
+  domains: {{ brand.domains | join(", ") }} · geo={{ brand.geo or "—" }}
+</p>
+<p class="small muted">Read-only client view: completed runs, their reports and exports.
+Figures of each run are read from the configuration it was measured with.</p>
+
+<h2>Runs</h2>
+<div class="card">
+{% if done_runs %}
+<table>
+  <tr><th>#</th><th>Started</th><th>Finished</th><th></th></tr>
+  {% for r in done_runs %}
+  <tr>
+    <td class="mono">{{ r.id }}</td>
+    <td class="mono small">{{ r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else "—" }}</td>
+    <td class="mono small">{{ r.finished_at.strftime("%Y-%m-%d %H:%M") if r.finished_at else "—" }}</td>
+    <td><a class="btn small" href="/share/{{ token }}/runs/{{ r.id }}">Open</a></td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="small muted">Only completed runs are listed.</p>
+{% else %}
+<p class="muted">No completed runs yet.</p>
+{% endif %}
+</div>
+
+{% if history_json %}{% include "_history.html" %}{% endif %}
+
+{% if done_list|length >= 2 %}
+<h2>Compare two runs</h2>
+<div class="card">
+<form method="get" action="/share/{{ token }}/compare" class="row-actions">
+  <label>Run A
+    <select name="a">{% for r in done_list %}<option value="{{ r.id }}">{{ r.label }}</option>{% endfor %}</select></label>
+  <label>Run B
+    <select name="b">{% for r in done_list %}<option value="{{ r.id }}" {{ 'selected' if loop.index0 == 1 }}>{{ r.label }}</option>{% endfor %}</select></label>
+  <button class="btn primary" type="submit">Compare</button>
+</form>
+<p class="small muted">Only done runs are listed. Paired by query × engine on the grounded
+channel, with Holm correction across all pairs.</p>
+</div>
+{% endif %}
+{% endblock %}
