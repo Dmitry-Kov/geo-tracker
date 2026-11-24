@@ -35,9 +35,11 @@ number can be defended, so correctness of the measurement beats features.
 
 ## Never commit
 
-`.env`, `queries.py`, `results*.csv`, `answers.jsonl`, `geo_tracker.db`,
-`backups/`, `dashboard*.html`, `.qwen/`. They hold API keys or client data and
-are gitignored. The repository is public: do not add client names or domains
+`.env`, `queries.py`, `results*.csv`, `answers.jsonl`, `geo_tracker.db` and
+its `-wal` / `-shm` sidecar files, `backups/`, `data/` (the Docker volume),
+`dashboard*.html`, `.qwen/`, `.opencode/`, `opencode.json`. They hold API keys
+or client data and are gitignored; `.dockerignore` keeps the same files out
+of the image. The repository is public: do not add client names or domains
 to code, docs, tests, commit messages or screenshots.
 
 ## Guarantees — do not break these
@@ -78,6 +80,13 @@ pass.
 - **A run that is not `done` never reads like a full report.** Its page and
   every export carry `incomplete_notice()`. Any new export or summary must
   use it. (`test_exports_of_a_cancelled_run_say_so`)
+- **The active slot is global.** One brand's pending or running run disables
+  Run now on every brand, and the page says another run is active.
+  (`test_run_now_disabled_when_another_brand_holds_the_slot`)
+- **A brand with an active or queued run cannot be deleted** — the run thread
+  still writes to its rows. And a run whose row has vanished stops instead of
+  crashing. (`test_delete_refused_while_run_active_or_queued`,
+  `test_execute_run_survives_a_deleted_run_row`)
 - **Schedules are crontab lines in UTC.** Build triggers with
   `cron_trigger()`, never `CronTrigger.from_crontab()`: that one numbers
   weekdays from Monday and uses the server's local timezone.
@@ -99,6 +108,46 @@ pass.
   `load_env` off for the whole test process; keep it that way.
 - **`queries.py` is CLI configuration only.** The service must start without
   it. (`test_service_starts_without_queries_py`)
+- **What is reachable without login is an explicit list:** `/login`,
+  `/logout`, `/static`, `/healthz` and the routes under `/share/`. Every
+  other route depends on `auth_guard`, and FastAPI's `/docs`, `/redoc` and
+  `/openapi.json` are switched off — they are public by default and list
+  every route of the admin service. A new public route is added to the
+  list in the test on purpose, never by leaving the guard off.
+  (`test_only_listed_routes_are_open_without_login`,
+  `test_api_docs_are_not_served`)
+- **`/healthz` returns "ok" after a database query and nothing else.** The
+  host guard lets GET/HEAD `/healthz` through on a loopback name even when
+  `APP_ALLOWED_HOSTS` lists only the public domain (a container healthcheck
+  has no other way in); every other path on loopback is still refused then.
+  Do not widen that exception. (`test_healthz_with_password_and_allowed_hosts`)
+
+### Client share links (service)
+
+`/share/{token}` is the one part of the service open to people without a
+login. Treat every change under it as a change to a public site.
+
+- **The token is the access, and it opens exactly one brand.** Runs, answers
+  and exports of any other brand read as "not found", as does an unknown or
+  revoked token. Rotating replaces the token; the old link dies at once.
+  (`test_cross_brand_isolation`, `test_share_lifecycle_enable_rotate_revoke`)
+- **Read-only.** No route under `/share/` changes state; management
+  (`/brands/{id}/share`, `.../share/revoke`) is behind login.
+  (`test_shared_pages_are_public_read_only_and_headed`,
+  `test_admin_pages_still_require_login`)
+- **Every `/share/` response carries `SHARE_HEADERS`** — `Referrer-Policy:
+  no-referrer`, so the token in the URL does not leak when a client clicks a
+  source link, and `X-Robots-Tag: noindex`. Error pages included.
+  (`test_unknown_token_is_404_with_share_headers`)
+- **Nothing internal reaches the client.** No API usage, token counts or
+  cost, no admin links, no cancel button, no polling of admin endpoints.
+  Templates branch on `share_mode`; a new block on a shared template must
+  decide which side it is on.
+  (`test_internal_usage_hidden_on_share_but_shown_to_admin`)
+- **Shared pages and exports are built by the same code as the admin ones**
+  (`run_context()`, `html_export()`, `docx_export()`), so they read the
+  run's snapshot and carry `incomplete_notice()`.
+  (`test_shared_cancelled_run_says_incomplete_everywhere`)
 
 ### Database (service)
 
@@ -110,6 +159,24 @@ pass.
   `backups/` next to the database). A start with nothing to migrate writes
   nothing. (`test_old_main_db_adopted_with_data_and_backup`,
   `test_repeat_startup_changes_nothing`)
+- **Every connection sets `busy_timeout`, `foreign_keys=ON` and WAL**
+  (`make_engine()`); SQLite pragmas are per connection, and without
+  `foreign_keys` the cascades are not enforced.
+  (`test_sqlite_pragmas_on_every_connection`,
+  `test_delete_finished_brand_with_all_children_leaves_no_orphans`)
+- **Copy the database only through SQLite's backup API** — `backup_database()`
+  or `python -m app.backup`. In WAL mode the newest rows live in the `-wal`
+  file, so copying `geo_tracker.db` alone gives a stale or broken copy.
+  (`test_online_backup_of_live_wal_db_captures_wal_rows`)
+- **Migrations run with `foreign_keys` off on their own connection** and turn
+  it back on: batch mode recreates tables, and dropping a referenced table
+  fails otherwise. Test every migration on a database with data.
+  (`test_upgrade_0002_with_data_to_0003`)
+- **Scheduled backups verify before they prune.** A copy that fails
+  `integrity_check` is deleted and the older copies are kept; pre-migration
+  copies in `backups/` are never pruned.
+  (`test_failed_verification_deletes_bad_copy_without_pruning`,
+  `test_scheduled_backups_stay_separate_from_pre_migration_snapshots`)
 - **No database path goes through a text URL.** `make_engine()` uses
   `URL.create()`, and `migrate_database()` hands its own connection to
   Alembic. SQLAlchemy 2.1 percent-decodes URLs parsed from text; 2.0 does not.
@@ -153,8 +220,34 @@ pass.
 - **Permutation counts are exact.** `paired_pvalue()` sums integers on a
   common denominator. Floats lose ties and make p too small.
   (`test_pvalue_counts_ties_exactly`)
+- **Reports are white-label.** No publisher or agency name in the source:
+  the name and accent color come from `REPORT_BRAND` / `REPORT_ACCENT`
+  through `resolve_branding()`, which accepts only `#RRGGBB` for the color.
+  (`test_report_sources_and_env_example_have_no_publisher_branding`,
+  `test_invalid_accent_never_reaches_css_or_docx`)
+- **Everything written into report markup is escaped.** Queries, titles,
+  domains and the brand name are untrusted: in the dashboard they pass
+  through `esc()`, and the embedded data cannot close its `<script>`.
+  (`test_dashboard_escapes_hostile_queries_and_titles`,
+  `test_dashboard_hostile_brand_and_subject_stay_escaped`)
+- **The third-party sources table is an aggregation of stored fields**
+  (`unowned_cited_sources()`), read through the run's snapshot. It does not
+  change what counts as a hit, so it does not bump the rules version.
+  (`test_sources_gap_respects_the_run_snapshot`)
 - **The CSV schema guard stays.** `check_results_schema()` refuses to append
   to a `results.csv` with other columns. (`test_schema_guard_rejects_old_header`)
+
+### Deployment (Docker)
+
+- **One container, one process, port 8000 not published.** Only Caddy on the
+  compose network reaches the app. That is the sole reason uvicorn may run
+  with `--forwarded-allow-ips=*`; publish the port and client addresses
+  (and with them the login limiter) can be forged.
+- **Caddy serves TCP only** (`protocols h1 h2`): the server it shares may
+  have another service on 443/udp.
+- **The app runs as UID 10001**; its database and backups live in `/data`,
+  the only mounted volume.
+- Run a deploy between runs: a restart ends the active run.
 
 ## What tests missed
 
@@ -173,15 +266,22 @@ Found only by running the real thing. Check these classes of change by hand.
 | p-values too small because float sums lost ties | comparing with exact arithmetic |
 | History drew an added alias as growth from 0% to 100% | seeding runs with a config change |
 | Geo was documented as unsupported by an API that supports it | reading the API docs |
+| `/docs` and `/openapi.json` served the route map without login | listing routes that lack the login guard |
+| The database's `-wal` file was not gitignored after WAL was turned on | `git check-ignore` on the new files |
 
 ## Known gaps
 
 Not bugs to fix in passing — each needs a decision or its own task.
 
-- API answers are not what a person sees in the consumer apps; the README
-  says so, reports should too.
 - Whether a requested geo changes the answers has not been measured.
 - A legacy database older than the Alembic baseline is stamped without a
   check.
-- No regular backups (only before migrations), no deployment recipe, no
-  limit on what a run may spend.
+- Backups stay on the same disk as the database; nothing copies them off the
+  server.
+- No limit on what a run may spend; scheduled runs are not gated by the
+  >100-call confirmation either.
+- A failing call is retried 4 times even when the error cannot go away (an
+  invalid API key), about 33 s per call, and a cancel waits for it.
+- Share tokens appear in the server's access log, and shared pages do not
+  send `Cache-Control: no-store`.
+- CI does not build the Docker image.

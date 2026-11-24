@@ -7,6 +7,10 @@ queries_*.py
 results*.csv
 answers.jsonl
 geo_tracker.db
+# WAL sidecar files of the same database: they hold the most recent rows
+*.db-wal
+*.db-shm
+*.db-journal
 backups/
 *.log
 dashboard*.html
