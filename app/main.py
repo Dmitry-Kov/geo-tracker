@@ -310,7 +310,11 @@ def create_app(db_path=None) -> FastAPI:
         stop_queue()
         sched.shutdown(wait=False)
 
-    app = FastAPI(title="geo-tracker", lifespan=lifespan)
+    # No interactive API docs: /docs, /redoc and /openapi.json are served
+    # without login by default and hand the whole route map of the admin
+    # service to anyone who asks.
+    app = FastAPI(title="geo-tracker", lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
     async def request_guard(request: Request, call_next):
