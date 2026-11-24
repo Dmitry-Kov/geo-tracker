@@ -1109,3 +1109,37 @@ def test_execute_run_survives_a_deleted_run_row(tmp_path, env):
             assert s.get(Brand, brand_id) is not None
             assert s.query(Run).count() == 0
             assert s.query(Answer).count() == 0         # nothing orphaned
+
+
+# ---------------------------------------------------------------------------
+# What is reachable without a login is an explicit, short list
+# ---------------------------------------------------------------------------
+
+OPEN_WITHOUT_LOGIN = {
+    "/login", "/logout", "/healthz", "/static",
+    "/share/{token}", "/share/{token}/compare", "/share/{token}/runs/{run_id}",
+    "/share/{token}/answers/{answer_id}",
+    "/share/{token}/runs/{run_id}/report.html",
+    "/share/{token}/runs/{run_id}/report.docx",
+}
+
+
+def test_only_listed_routes_are_open_without_login(client):
+    """Every route either depends on auth_guard or is on the list above. A
+    new public route has to be added here on purpose; FastAPI's own
+    /docs, /redoc and /openapi.json are not on it."""
+    open_paths = set()
+    for route in client.app.routes:
+        dependant = getattr(route, "dependant", None)
+        guards = [d.call.__name__ for d in dependant.dependencies] if dependant else []
+        if "auth_guard" not in guards:
+            open_paths.add(route.path)
+    assert open_paths == OPEN_WITHOUT_LOGIN
+
+
+def test_api_docs_are_not_served(tmp_path, env):
+    env.setenv("APP_PASSWORD", "secret")
+    application = create_app(db_path=tmp_path / "docs.db")
+    with TestClient(application) as c:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert c.get(path, follow_redirects=False).status_code == 404, path
